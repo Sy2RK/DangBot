@@ -1,0 +1,863 @@
+import DatabaseConstructor, { type Database } from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
+import type {
+  AppConfig,
+  AttachmentRecord,
+  RequestKind,
+  ResultKind,
+  RoomConfig,
+  RoomState,
+  TaskRecord,
+  TaskStatus,
+  UserRole,
+  AttachmentKind,
+  MemoryRecord,
+  MemoryScope
+} from '../types.js';
+import { ensureParentDir } from '../utils/fs.js';
+import { nowIso } from '../utils/time.js';
+
+export class AppDatabase {
+  private readonly db: Database;
+
+  private constructor(db: Database) {
+    this.db = db;
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+  }
+
+  static async open(filePath: string): Promise<AppDatabase> {
+    await ensureParentDir(filePath);
+    const db = new DatabaseConstructor(filePath);
+    const appDb = new AppDatabase(db);
+    appDb.migrate();
+    return appDb;
+  }
+
+  static memory(): AppDatabase {
+    const appDb = new AppDatabase(new DatabaseConstructor(':memory:'));
+    appDb.migrate();
+    return appDb;
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  migrate(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS rooms (
+        id TEXT PRIMARY KEY,
+        topic TEXT,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        authorized INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        display_name TEXT,
+        role TEXT NOT NULL DEFAULT 'member',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS room_members (
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (room_id, user_id),
+        FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        text TEXT,
+        mentioned INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_messages_user_created ON messages(room_id, user_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS attachments (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        message_id TEXT,
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_attachments_recent
+        ON attachments(room_id, user_id, kind, created_at);
+
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        request_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        result_kind TEXT,
+        result_text TEXT,
+        result_path TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tasks_room_status ON tasks(room_id, status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_tasks_user_created ON tasks(room_id, user_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS approvals (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        risk_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        approver_id TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS contexts (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        user_id TEXT,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_contexts_scope_created
+        ON contexts(scope, room_id, user_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS memories (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        user_id TEXT,
+        source TEXT NOT NULL DEFAULT 'manual',
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memories_scope_updated
+        ON memories(scope, room_id, user_id, updated_at);
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        room_id TEXT,
+        user_id TEXT,
+        action TEXT NOT NULL,
+        details TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+    `);
+    this.ensureColumn('memories', 'source', "TEXT NOT NULL DEFAULT 'manual'");
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_memories_source
+        ON memories(scope, room_id, user_id, source);
+    `);
+  }
+
+  seedConfig(config: AppConfig): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare('UPDATE rooms SET authorized = 0, enabled = 0, updated_at = ?').run(nowIso());
+
+      for (const adminId of config.auth.systemAdmins) {
+        this.upsertUser(adminId, undefined, 'system_admin');
+      }
+
+      for (const roomConfig of config.auth.rooms) {
+        this.upsertConfiguredRoom(roomConfig);
+      }
+    });
+    tx();
+  }
+
+  upsertConfiguredRoom(roomConfig: RoomConfig): RoomState {
+    const now = nowIso();
+    const roomId = roomConfig.id ?? `topic:${roomConfig.topic ?? randomUUID()}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO rooms (id, topic, enabled, authorized, created_at, updated_at)
+        VALUES (@id, @topic, @enabled, 1, @now, @now)
+        ON CONFLICT(id) DO UPDATE SET
+          topic = COALESCE(excluded.topic, rooms.topic),
+          enabled = excluded.enabled,
+          authorized = 1,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run({
+        id: roomId,
+        topic: roomConfig.topic,
+        enabled: roomConfig.enabled ? 1 : 0,
+        now
+      });
+
+    for (const adminId of roomConfig.admins) {
+      this.upsertUser(adminId, undefined, 'member');
+      this.setRoomMemberRole(roomId, adminId, 'group_admin');
+    }
+
+    return this.getRoomById(roomId)!;
+  }
+
+  resolveRoom(roomId: string, topic?: string): RoomState | undefined {
+    let room = this.getRoomById(roomId);
+    if (room) {
+      if (topic && room.topic !== topic) {
+        this.db
+          .prepare('UPDATE rooms SET topic = ?, updated_at = ? WHERE id = ?')
+          .run(topic, nowIso(), roomId);
+        room = this.getRoomById(roomId);
+      }
+      return room;
+    }
+
+    if (!topic) return undefined;
+    const byTopic = this.db
+      .prepare('SELECT * FROM rooms WHERE topic = ? AND authorized = 1 LIMIT 1')
+      .get(topic) as DbRoom | undefined;
+    if (!byTopic) return undefined;
+
+    if (byTopic.id.startsWith('topic:')) {
+      const tx = this.db.transaction(() => {
+        this.db
+          .prepare('UPDATE rooms SET id = ?, topic = ?, updated_at = ? WHERE id = ?')
+          .run(roomId, topic, nowIso(), byTopic.id);
+        this.db.prepare('UPDATE room_members SET room_id = ? WHERE room_id = ?').run(roomId, byTopic.id);
+      });
+      tx();
+      return this.getRoomById(roomId);
+    }
+
+    return normalizeRoom(byTopic, this.getRoomAdmins(byTopic.id));
+  }
+
+  getRoomById(roomId: string): RoomState | undefined {
+    const row = this.db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId) as DbRoom | undefined;
+    if (!row) return undefined;
+    return normalizeRoom(row, this.getRoomAdmins(roomId));
+  }
+
+  setRoomEnabled(roomId: string, enabled: boolean): void {
+    this.db
+      .prepare('UPDATE rooms SET enabled = ?, updated_at = ? WHERE id = ?')
+      .run(enabled ? 1 : 0, nowIso(), roomId);
+  }
+
+  upsertUser(userId: string, displayName?: string, role: UserRole = 'member'): void {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO users (id, display_name, role, created_at, updated_at)
+        VALUES (@id, @displayName, @role, @now, @now)
+        ON CONFLICT(id) DO UPDATE SET
+          display_name = COALESCE(excluded.display_name, users.display_name),
+          role = CASE
+            WHEN users.role = 'system_admin' THEN users.role
+            WHEN excluded.role = 'system_admin' THEN excluded.role
+            ELSE users.role
+          END,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run({ id: userId, displayName, role, now });
+  }
+
+  setRoomMemberRole(roomId: string, userId: string, role: UserRole): void {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO room_members (room_id, user_id, role, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(room_id, user_id) DO UPDATE SET
+          role = excluded.role,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(roomId, userId, role, now, now);
+  }
+
+  getUserRole(roomId: string, userId: string): UserRole {
+    const user = this.db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as
+      | { role: UserRole }
+      | undefined;
+    if (user?.role === 'system_admin') return 'system_admin';
+
+    const member = this.db
+      .prepare('SELECT role FROM room_members WHERE room_id = ? AND user_id = ?')
+      .get(roomId, userId) as { role: UserRole } | undefined;
+    if (member?.role === 'group_admin') return 'group_admin';
+    return 'member';
+  }
+
+  getRoomAdmins(roomId: string): string[] {
+    const rows = this.db
+      .prepare("SELECT user_id FROM room_members WHERE room_id = ? AND role = 'group_admin'")
+      .all(roomId) as Array<{ user_id: string }>;
+    return rows.map((row) => row.user_id);
+  }
+
+  insertMessage(input: {
+    id: string;
+    roomId: string;
+    userId: string;
+    text: string;
+    mentioned: boolean;
+    createdAt?: string;
+  }): void {
+    this.db
+      .prepare(
+        `
+        INSERT OR IGNORE INTO messages (id, room_id, user_id, text, mentioned, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        input.id,
+        input.roomId,
+        input.userId,
+        input.text,
+        input.mentioned ? 1 : 0,
+        input.createdAt ?? nowIso()
+      );
+  }
+
+  addAttachment(record: AttachmentRecord): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO attachments (
+          id, room_id, user_id, message_id, file_name, file_path, mime_type, size_bytes,
+          hash, kind, created_at, expires_at
+        )
+        VALUES (
+          @id, @roomId, @userId, @messageId, @fileName, @filePath, @mimeType, @sizeBytes,
+          @hash, @kind, @createdAt, @expiresAt
+        )
+      `
+      )
+      .run(record);
+  }
+
+  getRecentAttachment(roomId: string, userId: string, kind?: AttachmentKind): AttachmentRecord | undefined {
+    const whereKind = kind ? 'AND kind = @kind' : '';
+    const row = this.db
+      .prepare(
+        `
+        SELECT * FROM attachments
+        WHERE room_id = @roomId
+          AND user_id = @userId
+          AND expires_at > @now
+          ${whereKind}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `
+      )
+      .get({ roomId, userId, kind, now: nowIso() }) as DbAttachment | undefined;
+    return row ? normalizeAttachment(row) : undefined;
+  }
+
+  cleanupExpiredAttachments(): number {
+    const result = this.db.prepare('DELETE FROM attachments WHERE expires_at <= ?').run(nowIso());
+    return result.changes;
+  }
+
+  createTask(input: {
+    roomId: string;
+    userId: string;
+    requestType: RequestKind;
+    prompt: string;
+    status?: TaskStatus;
+  }): TaskRecord {
+    const now = nowIso();
+    const id = `task_${randomUUID().slice(0, 8)}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO tasks (id, room_id, user_id, request_type, status, prompt, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        id,
+        input.roomId,
+        input.userId,
+        input.requestType,
+        input.status ?? 'received',
+        input.prompt,
+        now,
+        now
+      );
+    return this.getTask(id)!;
+  }
+
+  getTask(taskId: string): TaskRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as DbTask | undefined;
+    return row ? normalizeTask(row) : undefined;
+  }
+
+  updateTask(
+    taskId: string,
+    patch: {
+      status?: TaskStatus;
+      resultKind?: ResultKind;
+      resultText?: string;
+      resultPath?: string;
+      error?: string;
+    }
+  ): TaskRecord | undefined {
+    const current = this.getTask(taskId);
+    if (!current) return undefined;
+
+    this.db
+      .prepare(
+        `
+        UPDATE tasks
+        SET status = @status,
+            result_kind = @resultKind,
+            result_text = @resultText,
+            result_path = @resultPath,
+            error = @error,
+            updated_at = @updatedAt
+        WHERE id = @id
+      `
+      )
+      .run({
+        id: taskId,
+        status: patch.status ?? current.status,
+        resultKind: patch.resultKind ?? current.resultKind,
+        resultText: patch.resultText ?? current.resultText,
+        resultPath: patch.resultPath ?? current.resultPath,
+        error: patch.error ?? current.error,
+        updatedAt: nowIso()
+      });
+
+    return this.getTask(taskId);
+  }
+
+  listRoomTasks(roomId: string, limit = 5): TaskRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM tasks WHERE room_id = ? ORDER BY created_at DESC LIMIT ?')
+      .all(roomId, limit) as DbTask[];
+    return rows.map(normalizeTask);
+  }
+
+  createApproval(input: {
+    taskId: string;
+    roomId: string;
+    requesterId: string;
+    riskType: string;
+    reason?: string;
+  }): void {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO approvals (
+          id, task_id, room_id, requester_id, risk_type, status, reason, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      `
+      )
+      .run(
+        `approval_${randomUUID().slice(0, 8)}`,
+        input.taskId,
+        input.roomId,
+        input.requesterId,
+        input.riskType,
+        input.reason,
+        now,
+        now
+      );
+  }
+
+  resolveApproval(taskId: string, approverId: string, approved: boolean): void {
+    this.db
+      .prepare(
+        `
+        UPDATE approvals
+        SET status = ?, approver_id = ?, updated_at = ?
+        WHERE task_id = ? AND status = 'pending'
+      `
+      )
+      .run(approved ? 'approved' : 'rejected', approverId, nowIso(), taskId);
+  }
+
+  appendContext(input: {
+    scope: 'user' | 'room';
+    roomId: string;
+    userId?: string;
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+  }): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO contexts (id, scope, room_id, user_id, role, content, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        `ctx_${randomUUID()}`,
+        input.scope,
+        input.roomId,
+        input.scope === 'user' ? input.userId : null,
+        input.role,
+        input.content,
+        nowIso()
+      );
+  }
+
+  getContext(input: {
+    scope: 'user' | 'room';
+    roomId: string;
+    userId?: string;
+    limit: number;
+  }): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
+    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+    const rows = this.db
+      .prepare(
+        `
+        SELECT role, content FROM contexts
+        WHERE scope = @scope AND room_id = @roomId ${userPredicate}
+        ORDER BY created_at DESC
+        LIMIT @limit
+      `
+      )
+      .all(input) as Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+    return rows.reverse();
+  }
+
+  getContextCount(input: { scope: 'user' | 'room'; roomId: string; userId?: string }): number {
+    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+    const row = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count FROM contexts
+        WHERE scope = @scope AND room_id = @roomId ${userPredicate}
+      `
+      )
+      .get(input) as { count: number };
+    return row.count;
+  }
+
+  listUserContextStats(): Array<{ roomId: string; userId: string; count: number; lastCreatedAt: string }> {
+    return this.db
+      .prepare(
+        `
+        SELECT room_id AS roomId, user_id AS userId, COUNT(*) AS count, MAX(created_at) AS lastCreatedAt
+        FROM contexts
+        WHERE scope = 'user' AND user_id IS NOT NULL
+        GROUP BY room_id, user_id
+      `
+      )
+      .all() as Array<{ roomId: string; userId: string; count: number; lastCreatedAt: string }>;
+  }
+
+  trimContext(input: { scope: 'user' | 'room'; roomId: string; userId?: string; keep: number }): number {
+    if (input.keep <= 0) return this.clearContext(input);
+
+    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+    const result = this.db
+      .prepare(
+        `
+        DELETE FROM contexts
+        WHERE scope = @scope AND room_id = @roomId ${userPredicate}
+          AND rowid NOT IN (
+            SELECT rowid FROM contexts
+            WHERE scope = @scope AND room_id = @roomId ${userPredicate}
+            ORDER BY created_at DESC
+            LIMIT @keep
+          )
+      `
+      )
+      .run(input);
+    return result.changes;
+  }
+
+  clearContext(input: { scope: 'user' | 'room'; roomId: string; userId?: string }): number {
+    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+    const result = this.db
+      .prepare(`DELETE FROM contexts WHERE scope = @scope AND room_id = @roomId ${userPredicate}`)
+      .run(input);
+    return result.changes;
+  }
+
+  addMemory(input: {
+    scope: MemoryScope;
+    roomId: string;
+    userId?: string;
+    source?: string;
+    content: string;
+  }): MemoryRecord {
+    const now = nowIso();
+    const id = `mem_${randomUUID().slice(0, 12)}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO memories (id, scope, room_id, user_id, source, content, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        id,
+        input.scope,
+        memoryRoomId(input.scope, input.roomId),
+        input.scope === 'user' ? input.userId : null,
+        input.source ?? 'manual',
+        input.content.trim(),
+        now,
+        now
+      );
+    return this.getMemoryById(id)!;
+  }
+
+  upsertMemory(input: {
+    scope: MemoryScope;
+    roomId: string;
+    userId?: string;
+    source: string;
+    content: string;
+  }): MemoryRecord {
+    const existing = this.getMemoryBySource(input);
+    if (!existing) return this.addMemory(input);
+
+    this.db
+      .prepare('UPDATE memories SET content = ?, updated_at = ? WHERE id = ?')
+      .run(input.content.trim(), nowIso(), existing.id);
+    return this.getMemoryById(existing.id)!;
+  }
+
+  getMemoryById(memoryId: string): MemoryRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(memoryId) as DbMemory | undefined;
+    return row ? normalizeMemory(row) : undefined;
+  }
+
+  getMemoryBySource(input: {
+    scope: MemoryScope;
+    roomId: string;
+    userId?: string;
+    source: string;
+  }): MemoryRecord | undefined {
+    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+    const row = this.db
+      .prepare(
+        `
+        SELECT * FROM memories
+        WHERE scope = @scope AND room_id = @roomId ${userPredicate} AND source = @source
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `
+      )
+      .get({
+        scope: input.scope,
+        roomId: memoryRoomId(input.scope, input.roomId),
+        userId: input.userId,
+        source: input.source
+      }) as DbMemory | undefined;
+    return row ? normalizeMemory(row) : undefined;
+  }
+
+  listMemories(input: {
+    scope: MemoryScope;
+    roomId: string;
+    userId?: string;
+    limit: number;
+  }): MemoryRecord[] {
+    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM memories
+        WHERE scope = @scope AND room_id = @roomId ${userPredicate}
+        ORDER BY updated_at DESC
+        LIMIT @limit
+      `
+      )
+      .all({
+        scope: input.scope,
+        roomId: memoryRoomId(input.scope, input.roomId),
+        userId: input.userId,
+        limit: input.limit
+      }) as DbMemory[];
+    return rows.map(normalizeMemory).reverse();
+  }
+
+  clearMemories(input: { scope: MemoryScope; roomId: string; userId?: string }): number {
+    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+    const result = this.db
+      .prepare(`DELETE FROM memories WHERE scope = @scope AND room_id = @roomId ${userPredicate}`)
+      .run({
+        scope: input.scope,
+        roomId: memoryRoomId(input.scope, input.roomId),
+        userId: input.userId
+      });
+    return result.changes;
+  }
+
+  addAudit(input: { roomId?: string; userId?: string; action: string; details?: unknown }): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO audit_logs (id, room_id, user_id, action, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        `audit_${randomUUID()}`,
+        input.roomId,
+        input.userId,
+        input.action,
+        input.details ? JSON.stringify(input.details) : undefined,
+        nowIso()
+      );
+  }
+
+  listAuthorizedRooms(): RoomState[] {
+    const rows = this.db.prepare('SELECT * FROM rooms WHERE authorized = 1 ORDER BY topic').all() as DbRoom[];
+    return rows.map((row) => normalizeRoom(row, this.getRoomAdmins(row.id)));
+  }
+
+  private ensureColumn(tableName: string, columnName: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === columnName)) return;
+    this.db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`).run();
+  }
+}
+
+interface DbRoom {
+  id: string;
+  topic?: string;
+  enabled: 0 | 1;
+  authorized: 0 | 1;
+}
+
+interface DbTask {
+  id: string;
+  room_id: string;
+  user_id: string;
+  request_type: RequestKind;
+  status: TaskStatus;
+  prompt: string;
+  result_kind?: ResultKind;
+  result_text?: string;
+  result_path?: string;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbAttachment {
+  id: string;
+  room_id: string;
+  user_id: string;
+  message_id?: string;
+  file_name: string;
+  file_path: string;
+  mime_type: string;
+  size_bytes: number;
+  hash: string;
+  kind: AttachmentKind;
+  created_at: string;
+  expires_at: string;
+}
+
+interface DbMemory {
+  id: string;
+  scope: MemoryScope;
+  room_id: string;
+  user_id?: string | null;
+  source: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function normalizeRoom(row: DbRoom, admins: string[]): RoomState {
+  return {
+    id: row.id,
+    topic: row.topic,
+    enabled: row.enabled === 1,
+    authorized: row.authorized === 1,
+    admins
+  };
+}
+
+function normalizeTask(row: DbTask): TaskRecord {
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    userId: row.user_id,
+    requestType: row.request_type,
+    status: row.status,
+    prompt: row.prompt,
+    resultKind: row.result_kind,
+    resultText: row.result_text,
+    resultPath: row.result_path,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function normalizeAttachment(row: DbAttachment): AttachmentRecord {
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    userId: row.user_id,
+    messageId: row.message_id,
+    fileName: row.file_name,
+    filePath: row.file_path,
+    mimeType: row.mime_type,
+    sizeBytes: row.size_bytes,
+    hash: row.hash,
+    kind: row.kind,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at
+  };
+}
+
+function normalizeMemory(row: DbMemory): MemoryRecord {
+  return {
+    id: row.id,
+    scope: row.scope,
+    roomId: row.room_id,
+    userId: row.user_id ?? undefined,
+    source: row.source,
+    content: row.content,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function memoryRoomId(scope: MemoryScope, roomId: string): string {
+  return scope === 'global' ? '*' : roomId;
+}

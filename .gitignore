@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+data/
+logs/
+.env
+config/local.yaml
+*.memory-card.json
+*.log
+.DS_Store

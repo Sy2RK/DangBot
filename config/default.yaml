@@ -1,0 +1,43 @@
+bot:
+  name: DangBot
+  mentionAliases:
+    - DangBot
+wechat:
+  puppet: wechaty-puppet-wechat4u
+  puppetOptions: {}
+storage:
+  sqlitePath: data/dangbot.sqlite
+  uploadsDir: data/uploads
+  outputsDir: data/outputs
+logging:
+  level: info
+  file: logs/dangbot.log
+llm:
+  baseURL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
+  apiKey: ${OPENAI_API_KEY:-}
+  textModel: ${OPENAI_TEXT_MODEL:-qwen/qwen3.6-plus}
+  visionModel: ${OPENAI_VISION_MODEL:-qwen/qwen3.6-plus}
+  imageModel: ${OPENAI_IMAGE_MODEL:-}
+limits:
+  userRequestsPerMinute: 6
+  roomRequestsPerMinute: 30
+  fileTasksPerMinute: 3
+  imageTasksPerMinute: 6
+  videoTasksPerMinute: 2
+  maxConcurrentTasks: 2
+  maxConcurrentLongTasks: 1
+  taskTimeoutMs: 120000
+  maxFileBytes: 20971520
+  maxImageBytes: 10485760
+  maxVideoBytes: 52428800
+  maxReplyTextChars: 1800
+  contextMessagesPerUser: 32
+  publicContextMessagesPerRoom: 160
+  memoryEntriesPerUser: 20
+  globalMemoryEntries: 30
+  userMemoryIdleMs: 3600000
+  memoryConsolidationKeepContextMessages: 8
+  attachmentTtlHours: 24
+auth:
+  systemAdmins: []
+  rooms: []
