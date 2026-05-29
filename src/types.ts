@@ -19,10 +19,12 @@ export type RequestKind =
   | 'summary'
   | 'rewrite'
   | 'translate'
+  | 'web_search'
   | 'file_analysis'
   | 'image_analysis'
   | 'video_analysis'
   | 'image_generation'
+  | 'video_generation'
   | 'report'
   | 'room_minutes'
   | 'data整理'
@@ -59,6 +61,20 @@ export interface AppConfig {
     textModel: string;
     visionModel: string;
     imageModel?: string;
+    videoModel?: string;
+  };
+  search: {
+    enabled: boolean;
+    provider: 'openrouter' | 'brave';
+    braveApiKey: string;
+    engine?: 'auto' | 'native' | 'exa' | 'firecrawl' | 'parallel';
+    searchContextSize: 'low' | 'medium' | 'high';
+    count: number;
+    country?: string;
+    searchLang?: string;
+    uiLang?: string;
+    safeSearch: 'off' | 'moderate' | 'strict';
+    extraSnippets: boolean;
   };
   limits: {
     userRequestsPerMinute: number;
@@ -66,9 +82,12 @@ export interface AppConfig {
     fileTasksPerMinute: number;
     imageTasksPerMinute: number;
     videoTasksPerMinute: number;
+    searchTasksPerMinute: number;
     maxConcurrentTasks: number;
     maxConcurrentLongTasks: number;
     taskTimeoutMs: number;
+    videoGenerationTimeoutMs: number;
+    videoGenerationPollIntervalMs: number;
     maxFileBytes: number;
     maxImageBytes: number;
     maxVideoBytes: number;
@@ -83,6 +102,7 @@ export interface AppConfig {
   };
   auth: {
     systemAdmins: string[];
+    allowTopicRoomBinding: boolean;
     rooms: RoomConfig[];
   };
 }
@@ -107,6 +127,7 @@ export interface IncomingMessage {
   mentioned: boolean;
   mentionText: string;
   attachments: IncomingAttachment[];
+  loadAttachments?: () => Promise<IncomingAttachment[]>;
   timestamp: Date;
 }
 

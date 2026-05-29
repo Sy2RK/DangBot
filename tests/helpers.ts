@@ -37,7 +37,19 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       apiKey: '',
       textModel: 'test-text',
       visionModel: 'test-vision',
-      imageModel: 'test-image'
+      imageModel: 'test-image',
+      videoModel: 'test-video'
+    },
+    search: {
+      enabled: false,
+      provider: 'openrouter',
+      braveApiKey: '',
+      searchContextSize: 'medium',
+      count: 5,
+      searchLang: 'zh-hans',
+      uiLang: 'zh-CN',
+      safeSearch: 'moderate',
+      extraSnippets: true
     },
     limits: {
       userRequestsPerMinute: 6,
@@ -45,9 +57,12 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       fileTasksPerMinute: 3,
       imageTasksPerMinute: 6,
       videoTasksPerMinute: 2,
+      searchTasksPerMinute: 6,
       maxConcurrentTasks: 2,
       maxConcurrentLongTasks: 1,
       taskTimeoutMs: 5000,
+      videoGenerationTimeoutMs: 5000,
+      videoGenerationPollIntervalMs: 10,
       maxFileBytes: 20 * 1024 * 1024,
       maxImageBytes: 10 * 1024 * 1024,
       maxVideoBytes: 50 * 1024 * 1024,
@@ -62,6 +77,7 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
     },
     auth: {
       systemAdmins: ['sys'],
+      allowTopicRoomBinding: false,
       rooms: [
         {
           id: 'room1',
@@ -81,6 +97,7 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
     storage: { ...base.storage, ...overrides.storage },
     logging: { ...base.logging, ...overrides.logging },
     llm: { ...base.llm, ...overrides.llm },
+    search: { ...base.search, ...overrides.search },
     limits: { ...base.limits, ...overrides.limits },
     auth: { ...base.auth, ...overrides.auth } as AppConfig['auth']
   };

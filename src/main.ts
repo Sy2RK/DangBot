@@ -6,6 +6,7 @@ import { TaskQueue } from './domain/taskQueue.js';
 import { createLogger } from './logger.js';
 import { FileService } from './services/files/fileService.js';
 import { OpenAICompatibleClient } from './services/llm/openaiCompatibleClient.js';
+import { BraveSearchClient } from './services/search/braveSearchClient.js';
 import { AppDatabase } from './storage/database.js';
 import { loadSoulPrompt } from './soul.js';
 import { ensureDir } from './utils/fs.js';
@@ -27,6 +28,7 @@ async function main(): Promise<void> {
   const fileService = new FileService(config);
   const systemPrompt = await loadSoulPrompt();
   const llm = new OpenAICompatibleClient(config.llm, config.storage.outputsDir, systemPrompt);
+  const webSearch = new BraveSearchClient(config.search);
   const queue = new TaskQueue(db, logger, {
     maxConcurrentTasks: config.limits.maxConcurrentTasks,
     maxConcurrentLongTasks: config.limits.maxConcurrentLongTasks,
@@ -34,7 +36,17 @@ async function main(): Promise<void> {
   });
   const memoryConsolidation = new MemoryConsolidationService(config, db, llm, logger);
   memoryConsolidation.start();
-  const router = new BotRequestRouter(config, db, queue, llm, fileService, logger, systemPrompt, memoryConsolidation);
+  const router = new BotRequestRouter(
+    config,
+    db,
+    queue,
+    llm,
+    fileService,
+    logger,
+    systemPrompt,
+    memoryConsolidation,
+    webSearch
+  );
   const adapter = new WechatyAdapter(config, router, logger);
   const keepAlive = setInterval(() => {
     logger.debug('dangbot keepalive');
@@ -58,6 +70,9 @@ async function main(): Promise<void> {
       puppet: process.env.WECHATY_PUPPET ?? config.wechat.puppet,
       sqlitePath: config.storage.sqlitePath,
       llmConfigured: llm.configured(),
+      webSearchConfigured:
+        config.search.enabled &&
+        (config.search.provider === 'openrouter' ? llm.configured() : webSearch.configured()),
       soulConfigured: systemPrompt.length > 0
     },
     'starting DangBot'

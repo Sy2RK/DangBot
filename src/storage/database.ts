@@ -104,6 +104,15 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_attachments_recent
         ON attachments(room_id, user_id, kind, created_at);
 
+      CREATE TABLE IF NOT EXISTS task_attachments (
+        task_id TEXT NOT NULL,
+        attachment_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (task_id, attachment_id),
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+        FOREIGN KEY (attachment_id) REFERENCES attachments(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
         room_id TEXT NOT NULL,
@@ -183,7 +192,16 @@ export class AppDatabase {
 
   seedConfig(config: AppConfig): void {
     const tx = this.db.transaction(() => {
-      this.db.prepare('UPDATE rooms SET authorized = 0, enabled = 0, updated_at = ?').run(nowIso());
+      const now = nowIso();
+      this.db.prepare('UPDATE rooms SET authorized = 0, enabled = 0, updated_at = ?').run(now);
+      this.db
+        .prepare(
+          "UPDATE room_members SET role = 'member', updated_at = ? WHERE role = 'group_admin'"
+        )
+        .run(now);
+      this.db
+        .prepare("UPDATE users SET role = 'member', updated_at = ? WHERE role = 'system_admin'")
+        .run(now);
 
       for (const adminId of config.auth.systemAdmins) {
         this.upsertUser(adminId, undefined, 'system_admin');
@@ -226,7 +244,11 @@ export class AppDatabase {
     return this.getRoomById(roomId)!;
   }
 
-  resolveRoom(roomId: string, topic?: string): RoomState | undefined {
+  resolveRoom(
+    roomId: string,
+    topic?: string,
+    options: { allowTopicBinding?: boolean } = {}
+  ): RoomState | undefined {
     let room = this.getRoomById(roomId);
     if (room) {
       if (topic && room.topic !== topic) {
@@ -238,7 +260,7 @@ export class AppDatabase {
       return room;
     }
 
-    if (!topic) return undefined;
+    if (!topic || !options.allowTopicBinding) return undefined;
     const byTopic = this.db
       .prepare('SELECT * FROM rooms WHERE topic = ? AND authorized = 1 LIMIT 1')
       .get(topic) as DbRoom | undefined;
@@ -249,7 +271,9 @@ export class AppDatabase {
         this.db
           .prepare('UPDATE rooms SET id = ?, topic = ?, updated_at = ? WHERE id = ?')
           .run(roomId, topic, nowIso(), byTopic.id);
-        this.db.prepare('UPDATE room_members SET room_id = ? WHERE room_id = ?').run(roomId, byTopic.id);
+        this.db
+          .prepare('UPDATE room_members SET room_id = ? WHERE room_id = ?')
+          .run(roomId, byTopic.id);
       });
       tx();
       return this.getRoomById(roomId);
@@ -259,7 +283,9 @@ export class AppDatabase {
   }
 
   getRoomById(roomId: string): RoomState | undefined {
-    const row = this.db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId) as DbRoom | undefined;
+    const row = this.db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId) as
+      | DbRoom
+      | undefined;
     if (!row) return undefined;
     return normalizeRoom(row, this.getRoomAdmins(roomId));
   }
@@ -318,6 +344,13 @@ export class AppDatabase {
     return 'member';
   }
 
+  getUserDisplayName(userId: string): string | undefined {
+    const row = this.db.prepare('SELECT display_name FROM users WHERE id = ?').get(userId) as
+      | { display_name?: string | null }
+      | undefined;
+    return row?.display_name ?? undefined;
+  }
+
   getRoomAdmins(roomId: string): string[] {
     const rows = this.db
       .prepare("SELECT user_id FROM room_members WHERE room_id = ? AND role = 'group_admin'")
@@ -367,7 +400,43 @@ export class AppDatabase {
       .run(record);
   }
 
-  getRecentAttachment(roomId: string, userId: string, kind?: AttachmentKind): AttachmentRecord | undefined {
+  linkTaskAttachments(taskId: string, attachments: AttachmentRecord[]): void {
+    if (attachments.length === 0) return;
+    const now = nowIso();
+    const insert = this.db.prepare(
+      `
+        INSERT OR IGNORE INTO task_attachments (task_id, attachment_id, created_at)
+        VALUES (?, ?, ?)
+      `
+    );
+    const tx = this.db.transaction(() => {
+      for (const attachment of attachments) {
+        insert.run(taskId, attachment.id, now);
+      }
+    });
+    tx();
+  }
+
+  listTaskAttachments(taskId: string): AttachmentRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT attachments.* FROM attachments
+        JOIN task_attachments ON task_attachments.attachment_id = attachments.id
+        WHERE task_attachments.task_id = ?
+          AND attachments.expires_at > ?
+        ORDER BY task_attachments.created_at, attachments.created_at
+      `
+      )
+      .all(taskId, nowIso()) as DbAttachment[];
+    return rows.map(normalizeAttachment);
+  }
+
+  getRecentAttachment(
+    roomId: string,
+    userId: string,
+    kind?: AttachmentKind
+  ): AttachmentRecord | undefined {
     const whereKind = kind ? 'AND kind = @kind' : '';
     const row = this.db
       .prepare(
@@ -420,7 +489,9 @@ export class AppDatabase {
   }
 
   getTask(taskId: string): TaskRecord | undefined {
-    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as DbTask | undefined;
+    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as
+      | DbTask
+      | undefined;
     return row ? normalizeTask(row) : undefined;
   }
 
@@ -569,7 +640,12 @@ export class AppDatabase {
     return row.count;
   }
 
-  listUserContextStats(): Array<{ roomId: string; userId: string; count: number; lastCreatedAt: string }> {
+  listUserContextStats(): Array<{
+    roomId: string;
+    userId: string;
+    count: number;
+    lastCreatedAt: string;
+  }> {
     return this.db
       .prepare(
         `
@@ -582,7 +658,12 @@ export class AppDatabase {
       .all() as Array<{ roomId: string; userId: string; count: number; lastCreatedAt: string }>;
   }
 
-  trimContext(input: { scope: 'user' | 'room'; roomId: string; userId?: string; keep: number }): number {
+  trimContext(input: {
+    scope: 'user' | 'room';
+    roomId: string;
+    userId?: string;
+    keep: number;
+  }): number {
     if (input.keep <= 0) return this.clearContext(input);
 
     const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
@@ -657,7 +738,9 @@ export class AppDatabase {
   }
 
   getMemoryById(memoryId: string): MemoryRecord | undefined {
-    const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(memoryId) as DbMemory | undefined;
+    const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(memoryId) as
+      | DbMemory
+      | undefined;
     return row ? normalizeMemory(row) : undefined;
   }
 
@@ -742,12 +825,16 @@ export class AppDatabase {
   }
 
   listAuthorizedRooms(): RoomState[] {
-    const rows = this.db.prepare('SELECT * FROM rooms WHERE authorized = 1 ORDER BY topic').all() as DbRoom[];
+    const rows = this.db
+      .prepare('SELECT * FROM rooms WHERE authorized = 1 ORDER BY topic')
+      .all() as DbRoom[];
     return rows.map((row) => normalizeRoom(row, this.getRoomAdmins(row.id)));
   }
 
   private ensureColumn(tableName: string, columnName: string, definition: string): void {
-    const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+    const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+      name: string;
+    }>;
     if (columns.some((column) => column.name === columnName)) return;
     this.db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`).run();
   }

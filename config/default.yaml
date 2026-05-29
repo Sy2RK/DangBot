@@ -17,16 +17,31 @@ llm:
   apiKey: ${OPENAI_API_KEY:-}
   textModel: ${OPENAI_TEXT_MODEL:-qwen/qwen3.6-plus}
   visionModel: ${OPENAI_VISION_MODEL:-qwen/qwen3.6-plus}
-  imageModel: ${OPENAI_IMAGE_MODEL:-}
+  imageModel: ${OPENAI_IMAGE_MODEL:-bytedance-seed/seedream-4.5}
+  videoModel: ${OPENAI_VIDEO_MODEL:-bytedance/seedance-2.0}
+search:
+  enabled: ${WEB_SEARCH_ENABLED:-false}
+  provider: ${WEB_SEARCH_PROVIDER:-openrouter}
+  braveApiKey: ${BRAVE_SEARCH_API_KEY:-}
+  engine: ${OPENROUTER_WEB_SEARCH_ENGINE:-}
+  searchContextSize: medium
+  count: 5
+  searchLang: zh-hans
+  uiLang: zh-CN
+  safeSearch: moderate
+  extraSnippets: true
 limits:
   userRequestsPerMinute: 6
   roomRequestsPerMinute: 30
   fileTasksPerMinute: 3
   imageTasksPerMinute: 6
   videoTasksPerMinute: 2
+  searchTasksPerMinute: 6
   maxConcurrentTasks: 2
   maxConcurrentLongTasks: 1
   taskTimeoutMs: 120000
+  videoGenerationTimeoutMs: 600000
+  videoGenerationPollIntervalMs: 10000
   maxFileBytes: 20971520
   maxImageBytes: 10485760
   maxVideoBytes: 52428800
@@ -40,4 +55,5 @@ limits:
   attachmentTtlHours: 24
 auth:
   systemAdmins: []
+  allowTopicRoomBinding: false
   rooms: []

@@ -17,6 +17,52 @@ describe('AppDatabase', () => {
     db.close();
   });
 
+  it('revokes admins removed from config', async () => {
+    const db = AppDatabase.memory();
+    db.seedConfig(
+      await makeTestConfig({
+        auth: {
+          systemAdmins: ['sys'],
+          rooms: [{ id: 'room1', topic: '测试群', enabled: true, admins: ['admin'] }]
+        }
+      })
+    );
+    expect(db.getUserRole('room1', 'sys')).toBe('system_admin');
+    expect(db.getUserRole('room1', 'admin')).toBe('group_admin');
+
+    db.seedConfig(
+      await makeTestConfig({
+        auth: {
+          systemAdmins: [],
+          rooms: [{ id: 'room1', topic: '测试群', enabled: true, admins: [] }]
+        }
+      })
+    );
+
+    expect(db.getUserRole('room1', 'sys')).toBe('member');
+    expect(db.getUserRole('room1', 'admin')).toBe('member');
+    db.close();
+  });
+
+  it('does not bind configured topic-only rooms unless explicitly allowed', async () => {
+    const config = await makeTestConfig({
+      auth: {
+        systemAdmins: [],
+        allowTopicRoomBinding: false,
+        rooms: [{ topic: '重名群', enabled: true, admins: [] }]
+      }
+    });
+    const db = AppDatabase.memory();
+    db.seedConfig(config);
+
+    expect(db.resolveRoom('actual-room-id', '重名群')).toBeUndefined();
+    expect(db.resolveRoom('actual-room-id', '重名群', { allowTopicBinding: true })).toMatchObject({
+      id: 'actual-room-id',
+      authorized: true
+    });
+    db.close();
+  });
+
   it('isolates user contexts inside the same room', () => {
     const db = AppDatabase.memory();
     db.appendContext({ scope: 'user', roomId: 'room1', userId: 'u1', role: 'user', content: 'one' });

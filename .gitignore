@@ -3,6 +3,7 @@ dist/
 coverage/
 data/
 logs/
+tmp/
 .env
 config/local.yaml
 *.memory-card.json

@@ -1,4 +1,4 @@
-import type { IncomingAttachment, ParsedCommand, RequestKind } from '../types.js';
+import type { ParsedCommand } from '../types.js';
 
 const taskIdPattern = /(task_[a-f0-9-]{8,36})/i;
 
@@ -78,36 +78,10 @@ export function parseCommand(text: string): ParsedCommand {
   return { type: 'normal_request', rawText, prompt: rawText };
 }
 
-export function inferRequestKind(prompt: string, attachments: IncomingAttachment[]): RequestKind {
-  const text = prompt.toLowerCase();
-  const hasImage = attachments.some((attachment) => attachment.kind === 'image');
-  const hasVideo = attachments.some((attachment) => attachment.kind === 'video');
-  const hasFile = attachments.some((attachment) => attachment.kind === 'file');
-
-  if (/(生成图片|画一张|出图|image generation|generate image)/i.test(text)) return 'image_generation';
-  if (hasImage || /(图片|照片|截图|ocr|识别图|看图|分析图|这张图|刚才的图)/i.test(text)) return 'image_analysis';
-  if (hasVideo || /(视频|录像|短视频|mp4|mpeg|mov|webm|看视频|分析视频|这个视频|刚才的视频)/i.test(text)) {
-    return 'video_analysis';
-  }
-  if (hasFile || /(文件|文档|表格|pdf|docx|xlsx|csv|附件)/i.test(text)) return 'file_analysis';
-  if (/(总结|纪要|归纳|提取待办|最近讨论|群聊内容)/i.test(text)) return 'summary';
-  if (/(翻译|translate)/i.test(text)) return 'translate';
-  if (/(改写|润色|rewrite|polish)/i.test(text)) return 'rewrite';
-  if (/(报告|report)/i.test(text)) return 'report';
-
-  return 'qa';
-}
-
-export function referencesAttachment(prompt: string): 'file' | 'image' | 'video' | undefined {
-  if (/(图片|照片|截图|ocr|识别图|看图|这张图|刚才的图)/i.test(prompt)) return 'image';
-  if (/(视频|录像|短视频|mp4|mpeg|mov|webm|看视频|分析视频|这个视频|刚才的视频)/i.test(prompt)) {
-    return 'video';
-  }
-  if (/(文件|文档|表格|pdf|docx|xlsx|csv|附件|刚才的文件)/i.test(prompt)) return 'file';
-  return undefined;
-}
-
-export function stripBotMention(text: string, aliases: string[]): { mentioned: boolean; text: string } {
+export function stripBotMention(
+  text: string,
+  aliases: string[]
+): { mentioned: boolean; text: string } {
   let output = text;
   let mentioned = false;
 

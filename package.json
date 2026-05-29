@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0",
+    "exceljs": "^4.4.0",
     "file-box": "^1.4.15",
     "mammoth": "^1.11.0",
     "mime-types": "^3.0.1",
@@ -27,12 +28,8 @@
     "pino": "^10.1.0",
     "wechaty": "^1.20.2",
     "wechaty-puppet-wechat4u": "^1.14.14",
-    "xlsx": "^0.18.5",
     "yaml": "^2.8.1",
     "zod": "^4.1.13"
-  },
-  "optionalDependencies": {
-    "wechaty-puppet-wechat": "^1.18.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -48,6 +45,11 @@
     "wechaty-puppet-mock": "^1.18.2"
   },
   "pnpm": {
+    "overrides": {
+      "form-data@2": "2.5.5",
+      "qs": "6.15.2",
+      "xml2js": "0.6.2"
+    },
     "onlyBuiltDependencies": [
       "@swc/core",
       "better-sqlite3",

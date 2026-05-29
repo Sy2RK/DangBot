@@ -5,11 +5,13 @@ import type { TaskRecord } from '../types.js';
 interface QueueItem {
   task: TaskRecord;
   longRunning: boolean;
+  timeoutMs?: number;
   handler: (signal: AbortSignal) => Promise<void>;
 }
 
 export class TaskQueue {
   private readonly queue: QueueItem[] = [];
+  private readonly runningTasks = new Map<string, AbortController>();
   private running = 0;
   private longRunning = 0;
 
@@ -23,9 +25,22 @@ export class TaskQueue {
     }
   ) {}
 
-  enqueue(task: TaskRecord, handler: (signal: AbortSignal) => Promise<void>, longRunning = false): void {
-    this.queue.push({ task, handler, longRunning });
+  enqueue(task: TaskRecord, handler: (signal: AbortSignal) => Promise<void>, longRunning = false, timeoutMs?: number): void {
+    this.queue.push({ task, handler, longRunning, timeoutMs });
     this.drain();
+  }
+
+  cancel(taskId: string): boolean {
+    const queuedIndex = this.queue.findIndex((item) => item.task.id === taskId);
+    if (queuedIndex >= 0) {
+      this.queue.splice(queuedIndex, 1);
+      return true;
+    }
+
+    const running = this.runningTasks.get(taskId);
+    if (!running) return false;
+    running.abort();
+    return true;
   }
 
   pendingCount(): number {
@@ -55,7 +70,8 @@ export class TaskQueue {
     if (item.longRunning) this.longRunning += 1;
 
     const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), this.options.taskTimeoutMs);
+    this.runningTasks.set(item.task.id, abort);
+    const timeout = setTimeout(() => abort.abort(), item.timeoutMs ?? this.options.taskTimeoutMs);
 
     try {
       const current = this.db.getTask(item.task.id);
@@ -70,10 +86,13 @@ export class TaskQueue {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const current = this.db.getTask(item.task.id);
+      if (current?.status === 'cancelled') return;
       this.logger.error({ error, taskId: item.task.id }, 'task failed');
       this.db.updateTask(item.task.id, { status: 'failed', error: message });
     } finally {
       clearTimeout(timeout);
+      this.runningTasks.delete(item.task.id);
       this.running -= 1;
       if (item.longRunning) this.longRunning -= 1;
       this.drain();

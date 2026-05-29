@@ -1,9 +1,9 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import ExcelJS from 'exceljs';
 import mammoth from 'mammoth';
 import { lookup } from 'mime-types';
-import * as XLSX from 'xlsx';
 import type { AppConfig, AttachmentKind, AttachmentRecord, IncomingAttachment } from '../../types.js';
 import { ensureDir, safeFileName, sha256File } from '../../utils/fs.js';
 import { addHoursIso, nowIso } from '../../utils/time.js';
@@ -91,11 +91,19 @@ export class FileService {
     }
 
     if (ext === '.xlsx') {
-      const workbook = XLSX.readFile(record.filePath);
-      const parts = workbook.SheetNames.map((sheetName) => {
-        const sheet = workbook.Sheets[sheetName];
-        if (!sheet) return '';
-        return `# ${sheetName}\n${XLSX.utils.sheet_to_csv(sheet).trim()}`;
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.readFile(record.filePath);
+      const parts = workbook.worksheets.map((worksheet) => {
+        const rows: string[] = [];
+        const columnCount = worksheet.actualColumnCount || worksheet.columnCount;
+        worksheet.eachRow((row) => {
+          const cells: string[] = [];
+          for (let column = 1; column <= columnCount; column += 1) {
+            cells.push(csvEscape(cellValueToText(row.getCell(column).value)));
+          }
+          rows.push(cells.join(','));
+        });
+        return `# ${worksheet.name}\n${rows.join('\n').trim()}`;
       });
       return normalizeExtractedText(parts.join('\n\n'));
     }
@@ -103,9 +111,9 @@ export class FileService {
     throw new Error('该文件类型暂不支持文本提取。');
   }
 
-  async writeMarkdownResult(title: string, content: string): Promise<string> {
+  async writeTextResult(title: string, content: string): Promise<string> {
     await ensureDir(this.config.storage.outputsDir);
-    const fileName = `${safeFileName(title)}_${Date.now()}.md`;
+    const fileName = `${safeFileName(title)}_${Date.now()}.txt`;
     const filePath = path.join(this.config.storage.outputsDir, fileName);
     await writeFile(filePath, content, 'utf8');
     return filePath;
@@ -115,10 +123,16 @@ export class FileService {
     await ensureDir(this.config.storage.outputsDir);
     const fileName = `${safeFileName(title)}_${Date.now()}.xlsx`;
     const filePath = path.join(this.config.storage.outputsDir, fileName);
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Result');
-    XLSX.writeFile(workbook, filePath);
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Result');
+    const headers = rows[0] ? Object.keys(rows[0]) : [];
+    if (headers.length > 0) {
+      worksheet.addRow(headers);
+      for (const row of rows) {
+        worksheet.addRow(headers.map((header) => row[header] ?? ''));
+      }
+    }
+    await workbook.xlsx.writeFile(filePath);
     return filePath;
   }
 
@@ -146,6 +160,23 @@ async function readUtf8WithLimit(filePath: string): Promise<string> {
 function normalizeExtractedText(text: string): string {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   return normalized.length > 80_000 ? `${normalized.slice(0, 80_000)}\n\n[内容过长，已截断。]` : normalized;
+}
+
+function cellValueToText(value: ExcelJS.CellValue): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== 'object') return String(value);
+  if ('result' in value) return cellValueToText(value.result as ExcelJS.CellValue);
+  if ('text' in value && typeof value.text === 'string') return value.text;
+  if ('richText' in value && Array.isArray(value.richText)) {
+    return value.richText.map((part) => part.text).join('');
+  }
+  return JSON.stringify(value);
+}
+
+function csvEscape(value: string): string {
+  if (!/[",\n]/.test(value)) return value;
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function formatBytes(bytes: number): string {

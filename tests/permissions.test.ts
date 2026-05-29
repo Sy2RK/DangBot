@@ -17,6 +17,15 @@ describe('permissions', () => {
     expect(canUseCommand(command, 'group_admin', enabledRoom)).toBe(true);
   });
 
+  it('blocks global memory writes from normal members', () => {
+    expect(canUseCommand({ type: 'remember_global', rawText: '全局记住', memoryText: 'x' }, 'member', enabledRoom)).toBe(
+      false
+    );
+    expect(canUseCommand({ type: 'clear_global_memory', rawText: '清空全局记忆' }, 'group_admin', enabledRoom)).toBe(
+      true
+    );
+  });
+
   it('allows only status for normal members in disabled rooms', () => {
     const disabled = { ...enabledRoom, enabled: false };
     expect(canUseCommand({ type: 'status', rawText: '状态' }, 'member', disabled)).toBe(true);

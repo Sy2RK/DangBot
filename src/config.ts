@@ -12,6 +12,22 @@ const roomConfigSchema = z.object({
   admins: z.array(z.string()).default([])
 });
 
+const booleanishSchema = z.preprocess((value) => {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return value;
+}, z.boolean());
+
+const optionalEnvStringSchema = z.preprocess(
+  (value) => (value === '' ? undefined : value),
+  z.string().optional()
+);
+
+const optionalSearchEngineSchema = z.preprocess(
+  (value) => (value === '' ? undefined : value),
+  z.enum(['auto', 'native', 'exa', 'firecrawl', 'parallel']).optional()
+);
+
 const configSchema = z.object({
   bot: z.object({
     name: z.string().min(1).default('DangBot'),
@@ -35,40 +51,91 @@ const configSchema = z.object({
     apiKey: z.string().default(''),
     textModel: z.string().default('gpt-4.1-mini'),
     visionModel: z.string().default('gpt-4.1-mini'),
-    imageModel: z.string().optional()
+    imageModel: z.string().optional(),
+    videoModel: z.string().optional()
   }),
+  search: z
+    .object({
+      enabled: booleanishSchema.default(false),
+      provider: z.enum(['openrouter', 'brave']).default('openrouter'),
+      braveApiKey: z.string().default(''),
+      engine: optionalSearchEngineSchema,
+      searchContextSize: z.enum(['low', 'medium', 'high']).default('medium'),
+      count: z.number().int().min(1).max(20).default(5),
+      country: optionalEnvStringSchema,
+      searchLang: optionalEnvStringSchema,
+      uiLang: optionalEnvStringSchema,
+      safeSearch: z.enum(['off', 'moderate', 'strict']).default('moderate'),
+      extraSnippets: z.boolean().default(true)
+    })
+    .default({
+      enabled: false,
+      provider: 'openrouter',
+      braveApiKey: '',
+      searchContextSize: 'medium',
+      count: 5,
+      safeSearch: 'moderate',
+      extraSnippets: true
+    }),
   limits: z.object({
     userRequestsPerMinute: z.number().int().positive().default(6),
     roomRequestsPerMinute: z.number().int().positive().default(30),
     fileTasksPerMinute: z.number().int().positive().default(3),
     imageTasksPerMinute: z.number().int().positive().default(6),
     videoTasksPerMinute: z.number().int().positive().default(2),
+    searchTasksPerMinute: z.number().int().positive().default(6),
     maxConcurrentTasks: z.number().int().positive().default(2),
     maxConcurrentLongTasks: z.number().int().positive().default(1),
     taskTimeoutMs: z.number().int().positive().default(120_000),
-    maxFileBytes: z.number().int().positive().default(20 * 1024 * 1024),
-    maxImageBytes: z.number().int().positive().default(10 * 1024 * 1024),
-    maxVideoBytes: z.number().int().positive().default(50 * 1024 * 1024),
+    videoGenerationTimeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .default(10 * 60 * 1000),
+    videoGenerationPollIntervalMs: z.number().int().positive().default(10_000),
+    maxFileBytes: z
+      .number()
+      .int()
+      .positive()
+      .default(20 * 1024 * 1024),
+    maxImageBytes: z
+      .number()
+      .int()
+      .positive()
+      .default(10 * 1024 * 1024),
+    maxVideoBytes: z
+      .number()
+      .int()
+      .positive()
+      .default(50 * 1024 * 1024),
     maxReplyTextChars: z.number().int().positive().default(1800),
     contextMessagesPerUser: z.number().int().positive().default(32),
     publicContextMessagesPerRoom: z.number().int().positive().default(160),
     memoryEntriesPerUser: z.number().int().positive().default(20),
     globalMemoryEntries: z.number().int().positive().default(30),
-    userMemoryIdleMs: z.number().int().positive().default(60 * 60 * 1000),
+    userMemoryIdleMs: z
+      .number()
+      .int()
+      .positive()
+      .default(60 * 60 * 1000),
     memoryConsolidationKeepContextMessages: z.number().int().nonnegative().default(8),
     attachmentTtlHours: z.number().int().positive().default(24)
   }),
   auth: z.object({
     systemAdmins: z.array(z.string()).default([]),
+    allowTopicRoomBinding: z.boolean().default(false),
     rooms: z.array(roomConfigSchema).default([])
   })
 });
 
 function expandEnv(value: unknown): unknown {
   if (typeof value === 'string') {
-    return value.replace(/\$\{([A-Z0-9_]+)(?::-([^}]*))?\}/g, (_match, name: string, fallback = '') => {
-      return process.env[name] ?? fallback;
-    });
+    return value.replace(
+      /\$\{([A-Z0-9_]+)(?::-([^}]*))?\}/g,
+      (_match, name: string, fallback = '') => {
+        return process.env[name] ?? fallback;
+      }
+    );
   }
 
   if (Array.isArray(value)) {
@@ -76,9 +143,7 @@ function expandEnv(value: unknown): unknown {
   }
 
   if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, expandEnv(entry)])
-    );
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, expandEnv(entry)]));
   }
 
   return value;
@@ -109,7 +174,9 @@ async function readYamlIfExists(filePath: string): Promise<unknown> {
 
 export async function loadConfig(configPath = process.env.DANGBOT_CONFIG): Promise<AppConfig> {
   const defaultConfigPath = path.resolve(process.cwd(), 'config/default.yaml');
-  const localConfigPath = configPath ? resolveFromCwd(configPath) : path.resolve(process.cwd(), 'config/local.yaml');
+  const localConfigPath = configPath
+    ? resolveFromCwd(configPath)
+    : path.resolve(process.cwd(), 'config/local.yaml');
 
   const defaultConfig = await readYamlIfExists(defaultConfigPath);
   const localConfig = await readYamlIfExists(localConfigPath);

@@ -80,7 +80,6 @@ export class WechatyAdapter {
     const text = typeof message.text === 'function' ? message.text() : '';
     const mentioned = await this.isMentioned(message, text);
     const mentionText = await this.mentionText(message, text, mentioned);
-    const attachments = await this.downloadAttachments(message, room.id, talker?.id);
 
     const incoming: IncomingMessage = {
       id: message.id ?? `msg_${randomUUID()}`,
@@ -91,7 +90,8 @@ export class WechatyAdapter {
       text,
       mentioned,
       mentionText,
-      attachments,
+      attachments: [],
+      loadAttachments: () => this.downloadAttachments(message, room.id, talker?.id),
       timestamp: new Date()
     };
 
@@ -111,7 +111,11 @@ export class WechatyAdapter {
     return stripBotMention(text, this.config.bot.mentionAliases).mentioned;
   }
 
-  private async mentionText(message: WechatyMessage, text: string, mentioned: boolean): Promise<string> {
+  private async mentionText(
+    message: WechatyMessage,
+    text: string,
+    mentioned: boolean
+  ): Promise<string> {
     if (!mentioned) return text.trim();
 
     if (typeof message.mentionText === 'function') {
@@ -137,15 +141,25 @@ export class WechatyAdapter {
 
     const fileBox = await message.toFileBox();
     const originalName = safeFileName(fileBox.name ?? `${message.id ?? randomUUID()}`);
-    const fileName = originalName.includes('.') ? originalName : `${originalName}${extensionForType(type)}`;
-    const dir = path.join(this.config.storage.uploadsDir, safeFileName(roomId), safeFileName(userId ?? 'unknown'));
+    const fileName = originalName.includes('.')
+      ? originalName
+      : `${originalName}${extensionForType(type)}`;
+    const dir = path.join(
+      this.config.storage.uploadsDir,
+      safeFileName(roomId),
+      safeFileName(userId ?? 'unknown')
+    );
     await ensureDir(dir);
 
     const filePath = path.join(dir, `${Date.now()}_${fileName}`);
     await fileBox.toFile(filePath, true);
     const sizeBytes = await fileSize(filePath);
-    const mimeType = this.guessMimeType(fileName, type);
-    const kind = mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('video/') ? 'video' : 'file';
+    const mimeType = guessWechatyMimeType(fileName, type);
+    const kind = mimeType.startsWith('image/')
+      ? 'image'
+      : mimeType.startsWith('video/')
+        ? 'video'
+        : 'file';
 
     return [
       {
@@ -157,34 +171,6 @@ export class WechatyAdapter {
         messageId: message.id
       }
     ];
-  }
-
-  private guessMimeType(fileName: string, type: unknown): string {
-    const ext = path.extname(fileName).toLowerCase();
-    if (isImageType(type)) {
-      if (ext === '.webp') return 'image/webp';
-      if (ext === '.png') return 'image/png';
-      return 'image/jpeg';
-    }
-
-    if (isVideoType(type)) {
-      if (ext === '.webm') return 'video/webm';
-      if (ext === '.mov') return 'video/mov';
-      if (ext === '.mpeg' || ext === '.mpg') return 'video/mpeg';
-      return 'video/mp4';
-    }
-
-    if (ext === '.mp4' || ext === '.m4v') return 'video/mp4';
-    if (ext === '.webm') return 'video/webm';
-    if (ext === '.mov') return 'video/mov';
-    if (ext === '.mpeg' || ext === '.mpg') return 'video/mpeg';
-    if (ext === '.pdf') return 'application/pdf';
-    if (ext === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    if (ext === '.xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-    if (ext === '.csv') return 'text/csv';
-    if (ext === '.md') return 'text/markdown';
-    if (ext === '.txt') return 'text/plain';
-    return 'application/octet-stream';
   }
 }
 
@@ -225,6 +211,38 @@ function extensionForType(type: unknown): string {
   if (isImageType(type)) return '.jpg';
   if (isVideoType(type)) return '.mp4';
   return '.bin';
+}
+
+export function guessWechatyMimeType(fileName: string, type: unknown): string {
+  const ext = path.extname(fileName).toLowerCase();
+  if (isImageType(type)) {
+    if (ext === '.webp') return 'image/webp';
+    if (ext === '.png') return 'image/png';
+    return 'image/jpeg';
+  }
+
+  if (isVideoType(type)) {
+    if (ext === '.webm') return 'video/webm';
+    if (ext === '.mov') return 'video/mov';
+    if (ext === '.mpeg' || ext === '.mpg') return 'video/mpeg';
+    return 'video/mp4';
+  }
+
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.png') return 'image/png';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.mp4' || ext === '.m4v') return 'video/mp4';
+  if (ext === '.webm') return 'video/webm';
+  if (ext === '.mov') return 'video/mov';
+  if (ext === '.mpeg' || ext === '.mpg') return 'video/mpeg';
+  if (ext === '.pdf') return 'application/pdf';
+  if (ext === '.docx')
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (ext === '.xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (ext === '.csv') return 'text/csv';
+  if (ext === '.md') return 'text/markdown';
+  if (ext === '.txt') return 'text/plain';
+  return 'application/octet-stream';
 }
 
 async function roomTopicOf(room: WechatyRoom): Promise<string> {

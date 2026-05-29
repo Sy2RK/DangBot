@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inferRequestKind, parseCommand, stripBotMention } from '../src/core/parser.js';
+import { parseCommand, stripBotMention } from '../src/core/parser.js';
 
 describe('parser', () => {
   it('parses admin commands', () => {
@@ -32,13 +32,5 @@ describe('parser', () => {
       mentioned: true,
       text: '总结一下'
     });
-  });
-
-  it('infers file and image tasks', () => {
-    expect(inferRequestKind('分析这张图', [])).toBe('image_analysis');
-    expect(inferRequestKind('分析这个视频', [])).toBe('video_analysis');
-    expect(inferRequestKind('生成图片：一只杯子', [])).toBe('image_generation');
-    expect(inferRequestKind('总结刚才的文件', [])).toBe('file_analysis');
-    expect(inferRequestKind('最近讨论总结', [])).toBe('summary');
   });
 });
