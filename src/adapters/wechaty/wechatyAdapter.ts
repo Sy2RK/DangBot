@@ -69,6 +69,16 @@ export class WechatyAdapter {
     }
   }
 
+  async createRoomResponder(roomId: string): Promise<BotResponder | undefined> {
+    if (!this.bot?.Room) return undefined;
+
+    const room =
+      (typeof this.bot.Room.load === 'function' ? this.bot.Room.load(roomId) : undefined) ??
+      (typeof this.bot.Room.find === 'function' ? await this.bot.Room.find({ id: roomId }) : undefined);
+    if (!room) return undefined;
+    return new WechatyResponder(room, undefined, this.config.bot.name);
+  }
+
   private async onMessage(message: WechatyMessage): Promise<void> {
     if (typeof message.self === 'function' && message.self()) return;
 

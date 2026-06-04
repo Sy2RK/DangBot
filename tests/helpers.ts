@@ -51,6 +51,16 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       safeSearch: 'moderate',
       extraSnippets: true
     },
+    tools: {
+      policy: {
+        defaultHighRiskRequiresApproval: true,
+        allowNetworkTools: true,
+        allowFileWriteTools: false,
+        maxToolOutputChars: 8000,
+        denyTools: [],
+        roomToolOverrides: []
+      }
+    },
     limits: {
       userRequestsPerMinute: 6,
       roomRequestsPerMinute: 30,
@@ -75,6 +85,12 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       memoryConsolidationKeepContextMessages: 8,
       attachmentTtlHours: 24
     },
+    automations: {
+      enabled: true,
+      tickMs: 30_000,
+      timezone: 'Asia/Shanghai',
+      maxConsecutiveFailures: 3
+    },
     auth: {
       systemAdmins: ['sys'],
       allowTopicRoomBinding: false,
@@ -98,7 +114,13 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
     logging: { ...base.logging, ...overrides.logging },
     llm: { ...base.llm, ...overrides.llm },
     search: { ...base.search, ...overrides.search },
+    tools: {
+      ...base.tools,
+      ...overrides.tools,
+      policy: { ...base.tools.policy, ...overrides.tools?.policy }
+    } as AppConfig['tools'],
     limits: { ...base.limits, ...overrides.limits },
+    automations: { ...base.automations, ...overrides.automations },
     auth: { ...base.auth, ...overrides.auth } as AppConfig['auth']
   };
 }

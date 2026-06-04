@@ -8,7 +8,11 @@ const adminCommands = new Set<ParsedCommand['type']>([
   'approve_task',
   'reject_task',
   'remember_global',
-  'clear_global_memory'
+  'clear_global_memory',
+  'create_automation',
+  'pause_automation',
+  'resume_automation',
+  'delete_automation'
 ]);
 
 export function canUseCommand(command: ParsedCommand, role: UserRole, room?: RoomState): boolean {

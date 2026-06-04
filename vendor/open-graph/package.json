@@ -1,0 +1,6 @@
+{
+  "name": "open-graph",
+  "version": "0.2.7-dangbot.0",
+  "main": "index.cjs",
+  "type": "commonjs"
+}

@@ -30,6 +30,14 @@ search:
   uiLang: zh-CN
   safeSearch: moderate
   extraSnippets: true
+tools:
+  policy:
+    defaultHighRiskRequiresApproval: true
+    allowNetworkTools: true
+    allowFileWriteTools: false
+    maxToolOutputChars: 8000
+    denyTools: []
+    roomToolOverrides: []
 limits:
   userRequestsPerMinute: 6
   roomRequestsPerMinute: 30
@@ -53,6 +61,11 @@ limits:
   userMemoryIdleMs: 3600000
   memoryConsolidationKeepContextMessages: 8
   attachmentTtlHours: 24
+automations:
+  enabled: true
+  tickMs: 30000
+  timezone: Asia/Shanghai
+  maxConsecutiveFailures: 3
 auth:
   systemAdmins: []
   allowTopicRoomBinding: false

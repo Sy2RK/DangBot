@@ -1,9 +1,15 @@
 import type { Logger } from 'pino';
 import { classifyRequestKind } from './intentClassifier.js';
 import { parseCommand } from './parser.js';
-import { isHighRiskPrompt, refusalMessage, shouldRefusePrompt } from './security.js';
+import { refusalMessage, shouldRefusePrompt } from './security.js';
 import { canUseCommand } from '../domain/permissions.js';
 import { SlidingWindowRateLimiter } from '../domain/rateLimiter.js';
+import {
+  computeNextRunForAutomation,
+  formatAutomationList,
+  parseAutomationDefinition,
+  serializeScheduleSpec
+} from '../domain/automations.js';
 import type { MemoryConsolidationService } from '../domain/memoryConsolidation.js';
 import type { TaskQueue } from '../domain/taskQueue.js';
 import type { FileService } from '../services/files/fileService.js';
@@ -13,6 +19,18 @@ import {
   type WebSearchClient
 } from '../services/search/braveSearchClient.js';
 import type { AppDatabase } from '../storage/database.js';
+import {
+  buildToolInputForRequest,
+  createBuiltinToolRegistry,
+  toolNameForRequestKind
+} from '../tools/builtin.js';
+import { ToolPolicyEngine } from '../tools/policy.js';
+import {
+  parseToolInput,
+  previewToolResult,
+  stringifyToolInput,
+  type ToolRegistry
+} from '../tools/registry.js';
 import { currentBeijingDateContext, currentBeijingDateLabel } from '../utils/time.js';
 import {
   appendPlainSources,
@@ -22,6 +40,7 @@ import {
 } from './replyStyle.js';
 import type {
   AppConfig,
+  AutomationRecord,
   AttachmentKind,
   AttachmentRecord,
   BotResponder,
@@ -65,6 +84,8 @@ interface TaskProgressReporter {
 
 export class BotRequestRouter {
   private readonly limiter = new SlidingWindowRateLimiter();
+  private readonly tools: ToolRegistry;
+  private readonly toolPolicy: ToolPolicyEngine;
 
   constructor(
     private readonly config: AppConfig,
@@ -76,7 +97,10 @@ export class BotRequestRouter {
     private readonly systemPrompt = '你是微信群里的公共智能助手。回答要清晰、简洁、可执行。不要泄露无关隐私；权限不足或信息不足时要说明。',
     private readonly memoryConsolidation?: MemoryConsolidationService,
     private readonly webSearch?: WebSearchClient
-  ) {}
+  ) {
+    this.tools = createBuiltinToolRegistry();
+    this.toolPolicy = new ToolPolicyEngine(config);
+  }
 
   async handleMessage(message: IncomingMessage, responder: BotResponder): Promise<void> {
     const room = this.db.resolveRoom(message.roomId, message.roomTopic, {
@@ -163,6 +187,21 @@ export class BotRequestRouter {
       case 'clear_global_memory':
         await this.clearGlobalMemory(room.id, message.senderId, responder);
         return;
+      case 'create_automation':
+        await this.createAutomation(command, room.id, message, responder);
+        return;
+      case 'list_automations':
+        await this.listAutomations(room.id, responder);
+        return;
+      case 'pause_automation':
+        await this.pauseAutomation(command, room.id, message.senderId, responder);
+        return;
+      case 'resume_automation':
+        await this.resumeAutomation(command, room.id, message.senderId, responder);
+        return;
+      case 'delete_automation':
+        await this.deleteAutomation(command, room.id, message.senderId, responder);
+        return;
       case 'cancel_task':
         await this.cancelTask(command, room.id, message.senderId, responder);
         return;
@@ -176,6 +215,48 @@ export class BotRequestRouter {
         await this.handleNormalRequest(command, message, room.id, responder);
         return;
     }
+  }
+
+  async handleAutomationTrigger(
+    automation: AutomationRecord,
+    responder: BotResponder
+  ): Promise<void> {
+    const current = this.db.getAutomation(automation.id);
+    if (!current || current.status !== 'active') return;
+
+    if (current.kind === 'reminder') {
+      const reply = await this.replyPlain(responder, `提醒：${current.prompt}`);
+      this.appendRoomContext(current.roomId, 'assistant', `${this.config.bot.name}: ${reply}`);
+      this.db.addAudit({
+        roomId: current.roomId,
+        userId: current.creatorId,
+        action: 'automation_reminder_sent',
+        details: { automationId: current.id }
+      });
+      return;
+    }
+
+    const task = this.db.createTask({
+      roomId: current.roomId,
+      userId: current.creatorId,
+      requestType: current.requestType,
+      prompt: current.prompt,
+      status: 'received',
+      toolName: current.toolName,
+      toolInputJson: current.toolInputJson
+    });
+    this.db.addAudit({
+      roomId: current.roomId,
+      userId: current.creatorId,
+      action: 'automation_task_created',
+      details: { automationId: current.id, taskId: task.id, requestType: task.requestType }
+    });
+
+    await this.replyPlain(responder, `自动化触发：${current.name}`);
+    if (shouldUseStepOutput(task.requestType)) {
+      await this.createProgressReporter(responder, true, task.id).received();
+    }
+    this.enqueueTask(task, [], responder);
   }
 
   private async materializeAttachments(message: IncomingMessage): Promise<IncomingAttachment[]> {
@@ -406,6 +487,170 @@ export class BotRequestRouter {
     await this.replyPlain(responder, replyPhrases.globalMemoryCleared);
   }
 
+  private async createAutomation(
+    command: ParsedCommand,
+    roomId: string,
+    message: IncomingMessage,
+    responder: BotResponder
+  ): Promise<void> {
+    if (!this.config.automations.enabled) {
+      await this.replyPlain(responder, '自动化功能当前没有开启。');
+      return;
+    }
+
+    const definition = parseAutomationDefinition(command.automationText ?? '', {
+      now: message.timestamp,
+      timezone: this.config.automations.timezone
+    });
+    if (!definition) {
+      await this.replyPlain(
+        responder,
+        '我没看懂这个自动化时间。可以这样说：提醒我 10分钟后 喝水；定时 每天 09:00 总结群聊。'
+      );
+      return;
+    }
+
+    if (
+      definition.scheduleType === 'once' &&
+      new Date(definition.nextRunAt).getTime() <= message.timestamp.getTime()
+    ) {
+      await this.replyPlain(responder, '这个时间已经过去啦，换一个未来时间吧。');
+      return;
+    }
+
+    const requestType =
+      definition.kind === 'reminder'
+        ? definition.requestType
+        : await classifyRequestKind(definition.prompt, [], this.llm, this.logger);
+    const toolName = toolNameForRequestKind(requestType);
+    const toolInput = toolName ? buildToolInputForRequest(requestType, definition.prompt) : undefined;
+    const toolInputJson = toolName ? stringifyToolInput(toolInput) : undefined;
+    const tool = toolName ? this.tools.get(toolName) : undefined;
+    const room = this.db.getRoomById(roomId);
+    const policy = this.toolPolicy.evaluate({
+      tool,
+      prompt: definition.prompt,
+      role: this.db.getUserRole(roomId, message.senderId),
+      room: room!,
+      hasApprover: this.hasApprover(roomId)
+    });
+
+    if (policy.action !== 'allow') {
+      this.db.addAudit({
+        roomId,
+        userId: message.senderId,
+        action: policy.action === 'deny' ? 'automation_policy_denied' : 'automation_policy_needs_approval',
+        details: { requestType, toolName, reason: policy.reason }
+      });
+      await this.replyPlain(
+        responder,
+        policy.action === 'deny'
+          ? refusalMessage()
+          : '这个自动化需要额外审批，先不创建。请让管理员直接创建或调整内容。'
+      );
+      return;
+    }
+
+    const automation = this.db.createAutomation({
+      roomId,
+      creatorId: message.senderId,
+      name: definition.name,
+      kind: definition.kind,
+      requestType,
+      scheduleType: definition.scheduleType,
+      scheduleSpecJson: serializeScheduleSpec(definition.scheduleSpec),
+      timezone: definition.timezone,
+      prompt: definition.prompt,
+      toolName,
+      toolInputJson,
+      nextRunAt: definition.nextRunAt
+    });
+    this.db.addAudit({
+      roomId,
+      userId: message.senderId,
+      action: 'automation_created',
+      details: { automationId: automation.id, kind: automation.kind, requestType }
+    });
+    await this.replyPlain(
+      responder,
+      [`自动化创建好啦：${automation.id}`, automation.name, `下次触发：${automation.nextRunAt}`].join(
+        '\n'
+      )
+    );
+  }
+
+  private async listAutomations(roomId: string, responder: BotResponder): Promise<void> {
+    await this.replyPlain(responder, formatAutomationList(this.db.listRoomAutomations(roomId)));
+  }
+
+  private async pauseAutomation(
+    command: ParsedCommand,
+    roomId: string,
+    userId: string,
+    responder: BotResponder
+  ): Promise<void> {
+    const automation = this.getRoomAutomation(command.automationId, roomId);
+    if (!automation) {
+      await this.replyPlain(responder, '我没找到这个自动化，请带上 auto_ 开头的编号。');
+      return;
+    }
+
+    this.db.updateAutomation(automation.id, { status: 'paused' });
+    this.db.addAudit({ roomId, userId, action: 'automation_paused', details: { automationId: automation.id } });
+    await this.replyPlain(responder, `已暂停：${automation.id}`);
+  }
+
+  private async resumeAutomation(
+    command: ParsedCommand,
+    roomId: string,
+    userId: string,
+    responder: BotResponder
+  ): Promise<void> {
+    const automation = this.getRoomAutomation(command.automationId, roomId);
+    if (!automation) {
+      await this.replyPlain(responder, '我没找到这个自动化，请带上 auto_ 开头的编号。');
+      return;
+    }
+    if (automation.scheduleType === 'once' && automation.status === 'completed') {
+      await this.replyPlain(responder, '一次性自动化已经完成，不能恢复。');
+      return;
+    }
+
+    const nextRunAt = computeNextRunForAutomation(automation, new Date());
+    this.db.updateAutomation(automation.id, {
+      status: 'active',
+      consecutiveFailures: 0,
+      nextRunAt,
+      lastError: null
+    });
+    this.db.addAudit({ roomId, userId, action: 'automation_resumed', details: { automationId: automation.id } });
+    await this.replyPlain(responder, `已恢复：${automation.id}\n下次触发：${nextRunAt}`);
+  }
+
+  private async deleteAutomation(
+    command: ParsedCommand,
+    roomId: string,
+    userId: string,
+    responder: BotResponder
+  ): Promise<void> {
+    const automation = this.getRoomAutomation(command.automationId, roomId);
+    if (!automation) {
+      await this.replyPlain(responder, '我没找到这个自动化，请带上 auto_ 开头的编号。');
+      return;
+    }
+
+    this.db.deleteAutomation(automation.id);
+    this.db.addAudit({ roomId, userId, action: 'automation_deleted', details: { automationId: automation.id } });
+    await this.replyPlain(responder, `已删除：${automation.id}`);
+  }
+
+  private getRoomAutomation(automationId: string | undefined, roomId: string): AutomationRecord | undefined {
+    if (!automationId) return undefined;
+    const automation = this.db.getAutomation(automationId);
+    if (!automation || automation.roomId !== roomId) return undefined;
+    return automation;
+  }
+
   private async cancelTask(
     command: ParsedCommand,
     roomId: string,
@@ -522,14 +767,40 @@ export class BotRequestRouter {
       return;
     }
 
-    const needsApproval = isHighRiskPrompt(prompt) && this.hasApprover(roomId);
+    const toolName = toolNameForRequestKind(requestType);
+    const toolInput = toolName ? buildToolInputForRequest(requestType, prompt) : undefined;
+    const toolInputJson = toolName ? stringifyToolInput(toolInput) : undefined;
+    const tool = toolName ? this.tools.get(toolName) : undefined;
+    const room = this.db.getRoomById(roomId);
+    const policy = this.toolPolicy.evaluate({
+      tool,
+      prompt,
+      role: this.db.getUserRole(roomId, message.senderId),
+      room: room!,
+      hasApprover: this.hasApprover(roomId)
+    });
+
+    if (policy.action === 'deny') {
+      this.db.addAudit({
+        roomId,
+        userId: message.senderId,
+        action: 'tool_policy_denied',
+        details: { requestType, toolName, reason: policy.reason }
+      });
+      await this.replyPlain(responder, refusalMessage());
+      return;
+    }
+
+    const needsApproval = policy.action === 'require_approval';
 
     const task = this.db.createTask({
       roomId,
       userId: message.senderId,
       requestType,
       prompt,
-      status: needsApproval ? 'waiting_approval' : 'received'
+      status: needsApproval ? 'waiting_approval' : 'received',
+      toolName,
+      toolInputJson
     });
     this.db.linkTaskAttachments(task.id, attachmentRecords);
 
@@ -545,8 +816,11 @@ export class BotRequestRouter {
         taskId: task.id,
         roomId,
         requesterId: message.senderId,
-        riskType: 'high_risk_prompt',
-        reason: prompt
+        riskType: policy.reason,
+        reason: prompt,
+        toolName,
+        toolInputJson,
+        policyReason: policy.reason
       });
       await this.replyPlain(
         responder,
@@ -725,6 +999,10 @@ export class BotRequestRouter {
       role: 'system',
       content: [this.systemPrompt, dateContext, memoryPrompt].filter(Boolean).join('\n\n')
     };
+
+    if (task.toolName) {
+      return this.executeRegisteredTool(task, attachments, signal, progress, system);
+    }
 
     if (task.requestType === 'image_generation') {
       const needsReferenceImage = promptReferencesImageForGeneration(task.prompt);
@@ -974,6 +1252,93 @@ export class BotRequestRouter {
     });
     this.memoryConsolidation?.triggerUserLimitCheck(task.roomId, task.userId);
     return { text };
+  }
+
+  private async executeRegisteredTool(
+    task: TaskRecord,
+    attachments: AttachmentRecord[],
+    signal: AbortSignal,
+    progress: TaskProgressReporter,
+    system: ChatTurn
+  ): Promise<{ text?: string; filePath?: string; imagePath?: string }> {
+    const definition = this.tools.get(task.toolName!);
+    if (!definition) {
+      throw new Error(`未知工具：${task.toolName}`);
+    }
+
+    const parsedInput = this.tools.parseInput(definition, parseToolInput(task.toolInputJson));
+    const toolCall = this.db.createToolCall({
+      taskId: task.id,
+      roomId: task.roomId,
+      userId: task.userId,
+      toolName: definition.name,
+      riskLevel: definition.riskLevel,
+      inputJson: stringifyToolInput(parsedInput)
+    });
+    this.db.addAudit({
+      roomId: task.roomId,
+      userId: task.userId,
+      action: 'tool_call_created',
+      details: { taskId: task.id, toolCallId: toolCall.id, toolName: definition.name }
+    });
+    this.db.updateToolCall(toolCall.id, { status: 'running', startedAt: new Date().toISOString() });
+
+    try {
+      const role = this.db.getUserRole(task.roomId, task.userId);
+      const result = await definition.execute(
+        {
+          config: this.config,
+          db: this.db,
+          llm: this.llm,
+          fileService: this.fileService,
+          webSearch: this.webSearch,
+          logger: this.logger,
+          task,
+          role,
+          attachments,
+          system,
+          roomContext: this.buildRoomContextTurn(task.roomId),
+          signal,
+          stage: async (message) => {
+            await progress.stage(message);
+          },
+          pickAttachment: (kind) => this.pickAttachment(task, attachments, kind)
+        },
+        parsedInput
+      );
+      this.db.updateToolCall(toolCall.id, {
+        status: 'completed',
+        resultKind: result.kind,
+        resultPreview: previewToolResult(result, this.config.tools.policy.maxToolOutputChars),
+        completedAt: new Date().toISOString()
+      });
+      this.db.addAudit({
+        roomId: task.roomId,
+        userId: task.userId,
+        action: 'tool_call_completed',
+        details: { taskId: task.id, toolCallId: toolCall.id, toolName: definition.name }
+      });
+
+      return {
+        text: result.text,
+        filePath: result.filePath,
+        imagePath: result.imagePath
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.db.updateToolCall(toolCall.id, {
+        status: signal.aborted ? 'cancelled' : 'failed',
+        error: message,
+        completedAt: new Date().toISOString()
+      });
+      this.db.addAudit({
+        roomId: task.roomId,
+        userId: task.userId,
+        action: 'tool_call_failed',
+        details: { taskId: task.id, toolCallId: toolCall.id, toolName: definition.name, error: message }
+      });
+      throw error;
+    }
   }
 
   private buildRoomContextTurn(roomId: string): ChatTurn | undefined {

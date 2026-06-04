@@ -77,6 +77,44 @@ const configSchema = z.object({
       safeSearch: 'moderate',
       extraSnippets: true
     }),
+  tools: z
+    .object({
+      policy: z
+        .object({
+          defaultHighRiskRequiresApproval: z.boolean().default(true),
+          allowNetworkTools: z.boolean().default(true),
+          allowFileWriteTools: z.boolean().default(false),
+          maxToolOutputChars: z.number().int().positive().default(8000),
+          denyTools: z.array(z.string()).default([]),
+          roomToolOverrides: z
+            .array(
+              z.object({
+                roomId: z.string(),
+                denyTools: z.array(z.string()).default([]),
+                allowTools: z.array(z.string()).default([])
+              })
+            )
+            .default([])
+        })
+        .default({
+          defaultHighRiskRequiresApproval: true,
+          allowNetworkTools: true,
+          allowFileWriteTools: false,
+          maxToolOutputChars: 8000,
+          denyTools: [],
+          roomToolOverrides: []
+        })
+    })
+    .default({
+      policy: {
+        defaultHighRiskRequiresApproval: true,
+        allowNetworkTools: true,
+        allowFileWriteTools: false,
+        maxToolOutputChars: 8000,
+        denyTools: [],
+        roomToolOverrides: []
+      }
+    }),
   limits: z.object({
     userRequestsPerMinute: z.number().int().positive().default(6),
     roomRequestsPerMinute: z.number().int().positive().default(30),
@@ -121,6 +159,19 @@ const configSchema = z.object({
     memoryConsolidationKeepContextMessages: z.number().int().nonnegative().default(8),
     attachmentTtlHours: z.number().int().positive().default(24)
   }),
+  automations: z
+    .object({
+      enabled: booleanishSchema.default(true),
+      tickMs: z.number().int().positive().default(30_000),
+      timezone: z.string().min(1).default('Asia/Shanghai'),
+      maxConsecutiveFailures: z.number().int().positive().default(3)
+    })
+    .default({
+      enabled: true,
+      tickMs: 30_000,
+      timezone: 'Asia/Shanghai',
+      maxConsecutiveFailures: 3
+    }),
   auth: z.object({
     systemAdmins: z.array(z.string()).default([]),
     allowTopicRoomBinding: z.boolean().default(false),

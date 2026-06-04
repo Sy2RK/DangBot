@@ -27,6 +27,26 @@ describe('parser', () => {
     expect(parseCommand('清空全局记忆').type).toBe('clear_global_memory');
   });
 
+  it('parses automation commands', () => {
+    expect(parseCommand('提醒我 10分钟后 喝水')).toMatchObject({
+      type: 'create_automation',
+      automationText: '提醒我 10分钟后 喝水'
+    });
+    expect(parseCommand('自动化列表').type).toBe('list_automations');
+    expect(parseCommand('暂停 auto_abc12345')).toMatchObject({
+      type: 'pause_automation',
+      automationId: 'auto_abc12345'
+    });
+    expect(parseCommand('恢复 auto_abc12345')).toMatchObject({
+      type: 'resume_automation',
+      automationId: 'auto_abc12345'
+    });
+    expect(parseCommand('删除 auto_abc12345')).toMatchObject({
+      type: 'delete_automation',
+      automationId: 'auto_abc12345'
+    });
+  });
+
   it('strips bot mentions with aliases', () => {
     expect(stripBotMention('@DangBot 总结一下', ['DangBot'])).toEqual({
       mentioned: true,

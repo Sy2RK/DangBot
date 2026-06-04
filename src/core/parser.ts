@@ -1,6 +1,7 @@
 import type { ParsedCommand } from '../types.js';
 
 const taskIdPattern = /(task_[a-f0-9-]{8,36})/i;
+const automationIdPattern = /(auto_[a-f0-9-]{8,36})/i;
 
 export function parseCommand(text: string): ParsedCommand {
   const rawText = text.trim();
@@ -17,6 +18,28 @@ export function parseCommand(text: string): ParsedCommand {
 
   if (/^(状态|status|运行状态|任务状态)$/.test(lower)) {
     return { type: 'status', rawText };
+  }
+
+  if (/^(自动化列表|提醒列表|定时任务列表|查看自动化|查看提醒|automations|reminders)$/i.test(normalized)) {
+    return { type: 'list_automations', rawText };
+  }
+
+  const automationId = normalized.match(automationIdPattern)?.[1];
+  if (automationId && /^(暂停|停用|pause)/i.test(normalized)) {
+    return { type: 'pause_automation', rawText, automationId };
+  }
+  if (automationId && /^(恢复|启用|resume|start)/i.test(normalized)) {
+    return { type: 'resume_automation', rawText, automationId };
+  }
+  if (automationId && /^(删除|移除|取消自动化|delete|remove)/i.test(normalized)) {
+    return { type: 'delete_automation', rawText, automationId };
+  }
+
+  const createAutomation = normalized.match(
+    /^(?:创建自动化|新增自动化|自动化|定时任务|定时|创建提醒|提醒我|提醒|schedule|remind me|remind)[:：]?\s*(.+)$/i
+  );
+  if (createAutomation?.[1]?.trim()) {
+    return { type: 'create_automation', rawText, automationText: normalized };
   }
 
   const globalMemory = normalized.match(/^(?:全局|公共|大家)(?:记住|记一下|记忆)[:：]?\s*(.+)$/i);

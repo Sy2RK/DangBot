@@ -14,6 +14,18 @@ export type AttachmentKind = 'file' | 'image' | 'video';
 
 export type MemoryScope = 'user' | 'global';
 
+export type ToolRiskLevel = 'low' | 'medium' | 'high' | 'blocked';
+
+export type ToolCallStatus = 'created' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type ToolResultKind = 'text' | 'image' | 'file';
+
+export type AutomationKind = 'reminder' | 'scheduled_prompt' | 'scheduled_tool';
+
+export type AutomationScheduleType = 'once' | 'daily' | 'weekly' | 'interval';
+
+export type AutomationStatus = 'active' | 'paused' | 'completed' | 'failed';
+
 export type RequestKind =
   | 'qa'
   | 'summary'
@@ -76,6 +88,20 @@ export interface AppConfig {
     safeSearch: 'off' | 'moderate' | 'strict';
     extraSnippets: boolean;
   };
+  tools: {
+    policy: {
+      defaultHighRiskRequiresApproval: boolean;
+      allowNetworkTools: boolean;
+      allowFileWriteTools: boolean;
+      maxToolOutputChars: number;
+      denyTools: string[];
+      roomToolOverrides: Array<{
+        roomId: string;
+        denyTools: string[];
+        allowTools: string[];
+      }>;
+    };
+  };
   limits: {
     userRequestsPerMinute: number;
     roomRequestsPerMinute: number;
@@ -99,6 +125,12 @@ export interface AppConfig {
     userMemoryIdleMs: number;
     memoryConsolidationKeepContextMessages: number;
     attachmentTtlHours: number;
+  };
+  automations: {
+    enabled: boolean;
+    tickMs: number;
+    timezone: string;
+    maxConsecutiveFailures: number;
   };
   auth: {
     systemAdmins: string[];
@@ -153,11 +185,18 @@ export interface ParsedCommand {
     | 'show_global_memory'
     | 'clear_user_memory'
     | 'clear_global_memory'
+    | 'create_automation'
+    | 'list_automations'
+    | 'pause_automation'
+    | 'resume_automation'
+    | 'delete_automation'
     | 'normal_request';
   rawText: string;
   taskId?: string;
+  automationId?: string;
   prompt?: string;
   memoryText?: string;
+  automationText?: string;
 }
 
 export interface TaskRecord {
@@ -171,6 +210,8 @@ export interface TaskRecord {
   resultText?: string;
   resultPath?: string;
   error?: string;
+  toolName?: string;
+  toolInputJson?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -197,6 +238,46 @@ export interface MemoryRecord {
   userId?: string;
   source: string;
   content: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ToolCallRecord {
+  id: string;
+  taskId: string;
+  roomId: string;
+  userId: string;
+  toolName: string;
+  status: ToolCallStatus;
+  riskLevel: ToolRiskLevel;
+  inputJson: string;
+  resultKind?: ToolResultKind;
+  resultPreview?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationRecord {
+  id: string;
+  roomId: string;
+  creatorId: string;
+  name: string;
+  kind: AutomationKind;
+  requestType: RequestKind;
+  scheduleType: AutomationScheduleType;
+  scheduleSpecJson: string;
+  timezone: string;
+  prompt: string;
+  toolName?: string;
+  toolInputJson?: string;
+  status: AutomationStatus;
+  consecutiveFailures: number;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  lastError?: string;
   createdAt: string;
   updatedAt: string;
 }

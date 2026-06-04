@@ -208,6 +208,50 @@ describe('BotRequestRouter', () => {
     expect(
       tasks.some((task) => task.requestType === 'video_generation' && task.resultKind === 'file')
     ).toBe(true);
+    const imageTask = tasks.find((task) => task.requestType === 'image_generation');
+    const videoTask = tasks.find((task) => task.requestType === 'video_generation');
+    expect(imageTask ? db.listTaskToolCalls(imageTask.id).at(0) : undefined).toMatchObject({
+      toolName: 'image.generate',
+      status: 'completed'
+    });
+    expect(videoTask ? db.listTaskToolCalls(videoTask.id).at(0) : undefined).toMatchObject({
+      toolName: 'video.generate',
+      status: 'completed'
+    });
+  });
+
+  it('requires approval for high-risk tools when approvers exist', async () => {
+    const { router, db } = await setup({ enabled: true });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '生成视频：一只猫慢慢伸懒腰' }),
+      responder
+    );
+
+    expect(responder.texts.at(-1)).toContain('管理员点头');
+    expect(db.listRoomTasks('room1', 1)[0]).toMatchObject({
+      requestType: 'video_generation',
+      toolName: 'video.generate',
+      status: 'waiting_approval'
+    });
+  });
+
+  it('denies disabled tools before creating tasks', async () => {
+    const { router, db } = await setup({
+      enabled: true,
+      searchEnabled: true,
+      denyTools: ['web.search']
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '联网搜索 Qwen 最新消息' }),
+      responder
+    );
+
+    expect(responder.texts.at(-1)).toContain('我不能执行');
+    expect(db.listRoomTasks('room1')).toEqual([]);
   });
 
   it('runs web search requests through OpenRouter web search and returns sources', async () => {
@@ -533,6 +577,119 @@ describe('BotRequestRouter', () => {
     const content = await readFile(filePath, 'utf8');
     expect(content).toBe(['长结果', '', '1、第一段内容很长', '2、第二段内容也很长'].join('\n'));
   });
+
+  it('creates and manages automations through admin commands', async () => {
+    const { router, db } = await setup({ enabled: true });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({
+        senderId: 'admin',
+        senderName: 'Admin',
+        mentioned: true,
+        mentionText: '提醒我 10分钟后 喝水',
+        timestamp: new Date('2026-06-05T01:30:00.000Z')
+      }),
+      responder
+    );
+
+    const automation = db.listRoomAutomations('room1', 1)[0];
+    expect(automation).toMatchObject({
+      kind: 'reminder',
+      prompt: '喝水',
+      status: 'active',
+      nextRunAt: '2026-06-05T01:40:00.000Z'
+    });
+    expect(responder.texts.at(-1)).toContain(`自动化创建好啦：${automation?.id}`);
+
+    await router.handleMessage(
+      message({ senderId: 'admin', senderName: 'Admin', mentioned: true, mentionText: '自动化列表' }),
+      responder
+    );
+    expect(responder.texts.at(-1)).toContain(automation?.id);
+
+    await router.handleMessage(
+      message({
+        senderId: 'admin',
+        senderName: 'Admin',
+        mentioned: true,
+        mentionText: `暂停 ${automation?.id}`
+      }),
+      responder
+    );
+    expect(db.getAutomation(automation!.id)?.status).toBe('paused');
+
+    await router.handleMessage(
+      message({
+        senderId: 'admin',
+        senderName: 'Admin',
+        mentioned: true,
+        mentionText: `恢复 ${automation?.id}`
+      }),
+      responder
+    );
+    expect(db.getAutomation(automation!.id)?.status).toBe('active');
+
+    await router.handleMessage(
+      message({
+        senderId: 'admin',
+        senderName: 'Admin',
+        mentioned: true,
+        mentionText: `删除 ${automation?.id}`
+      }),
+      responder
+    );
+    expect(db.getAutomation(automation!.id)).toBeUndefined();
+  });
+
+  it('runs reminder and scheduled prompt automations', async () => {
+    const { router, db } = await setup({ enabled: true });
+    const reminderResponder = new MemoryResponder();
+    const taskResponder = new MemoryResponder();
+
+    const reminder = db.createAutomation({
+      roomId: 'room1',
+      creatorId: 'admin',
+      name: '提醒:喝水',
+      kind: 'reminder',
+      requestType: 'qa',
+      scheduleType: 'once',
+      scheduleSpecJson: JSON.stringify({
+        type: 'once',
+        at: '2026-06-05T01:40:00.000Z',
+        label: '10分钟后'
+      }),
+      timezone: 'Asia/Shanghai',
+      prompt: '喝水',
+      nextRunAt: '2026-06-05T01:40:00.000Z'
+    });
+    await router.handleAutomationTrigger(reminder, reminderResponder);
+    expect(reminderResponder.texts).toEqual(['提醒：喝水']);
+    expect(db.listRoomTasks('room1')).toEqual([]);
+
+    const scheduled = db.createAutomation({
+      roomId: 'room1',
+      creatorId: 'admin',
+      name: '定时任务:报个状态',
+      kind: 'scheduled_prompt',
+      requestType: 'qa',
+      scheduleType: 'once',
+      scheduleSpecJson: JSON.stringify({
+        type: 'once',
+        at: '2026-06-05T01:40:00.000Z',
+        label: '10分钟后'
+      }),
+      timezone: 'Asia/Shanghai',
+      prompt: '报个状态',
+      nextRunAt: '2026-06-05T01:40:00.000Z'
+    });
+    await router.handleAutomationTrigger(scheduled, taskResponder);
+    await vi.waitFor(() => expect(taskResponder.texts).toContain('mock answer'));
+    expect(db.listRoomTasks('room1', 1)[0]).toMatchObject({
+      requestType: 'qa',
+      status: 'completed'
+    });
+  });
 });
 
 async function setup(
@@ -547,6 +704,7 @@ async function setup(
     intent?: RequestKind | ((classificationPrompt: string) => RequestKind);
     searchEnabled?: boolean;
     maxReplyTextChars?: number;
+    denyTools?: string[];
   } = {}
 ) {
   const admins = options.adminless ? [] : ['admin'];
@@ -557,6 +715,11 @@ async function setup(
     },
     limits: {
       maxReplyTextChars: options.maxReplyTextChars ?? 1800
+    },
+    tools: {
+      policy: {
+        denyTools: options.denyTools ?? []
+      }
     },
     auth: {
       systemAdmins: options.adminless ? [] : ['sys'],

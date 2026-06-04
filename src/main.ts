@@ -1,6 +1,7 @@
 import { loadConfig } from './config.js';
 import { WechatyAdapter } from './adapters/wechaty/wechatyAdapter.js';
 import { BotRequestRouter } from './core/router.js';
+import { AutomationScheduler } from './domain/automations.js';
 import { MemoryConsolidationService } from './domain/memoryConsolidation.js';
 import { TaskQueue } from './domain/taskQueue.js';
 import { createLogger } from './logger.js';
@@ -48,6 +49,15 @@ async function main(): Promise<void> {
     webSearch
   );
   const adapter = new WechatyAdapter(config, router, logger);
+  const automationScheduler = new AutomationScheduler(
+    config,
+    db,
+    router,
+    {
+      createRoomResponder: (roomId) => adapter.createRoomResponder(roomId)
+    },
+    logger
+  );
   const keepAlive = setInterval(() => {
     logger.debug('dangbot keepalive');
   }, 60_000);
@@ -55,6 +65,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');
     clearInterval(keepAlive);
+    automationScheduler.stop();
     memoryConsolidation.stop();
     await adapter.stop();
     db.close();
@@ -79,6 +90,7 @@ async function main(): Promise<void> {
   );
 
   await adapter.start();
+  automationScheduler.start();
 }
 
 main().catch((error) => {

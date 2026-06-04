@@ -1,0 +1,6 @@
+{
+  "name": "file-type",
+  "version": "21.3.1-dangbot.0",
+  "main": "index.cjs",
+  "type": "commonjs"
+}

@@ -24,6 +24,10 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - `全局记住 ...`: add a persistent global memory used for all callers.
 - `我的记忆` / `全局记忆`: show persistent memories.
 - `清空我的记忆` / `清空全局记忆`: clear persistent memories.
+- `提醒我 10分钟后 喝水` / `提醒我每天 09:00 喝水`: create a reminder. Creating, pausing, resuming, and deleting automations require a group admin or system admin.
+- `定时 每天 09:00 总结群聊` / `自动化 每30分钟 联网搜索 Qwen 最新消息`: create a recurring scheduled agent request.
+- `自动化列表`: list this room's automations.
+- `暂停 auto_xxx` / `恢复 auto_xxx` / `删除 auto_xxx`: manage an automation by ID.
 - `生成图片 ...` / `画一张 ...` / `出图 ...`: generate an image. The default OpenRouter model is `bytedance-seed/seedream-4.5`.
 - `生成视频 ...` / `做个视频 ...` / `出视频 ...`: generate a short video. The default OpenRouter model is `bytedance/seedance-2.0`. Prompts such as `5s`, `10 秒`, or `五秒` are parsed and passed as the requested duration.
 - Send an image and ask `把这张图动起来`: generate an image-to-video result from that image.
@@ -47,6 +51,13 @@ All commands must mention the bot, for example `@DangBot 状态`.
 
 Manual memories are stored separately from automatic summaries, so explicit `记住 ...` entries are not overwritten by the background consolidation job.
 
+## Tools, Policy, And Automations
+
+- Built-in tool calls such as web search, file analysis, image/video analysis, and image/video generation are registered in a tool registry and recorded in SQLite.
+- `tools.policy.denyTools` can disable specific tools globally, for example `web.search`; `roomToolOverrides` can scope allow/deny rules to a room.
+- High-risk tools, including video generation, require approval when an approver is configured. Adminless mode keeps the earlier no-approval behavior.
+- Automations support one-time reminders, daily schedules, weekly schedules, and fixed intervals. Due automations are dispatched after the Wechaty adapter starts and reuse the same task queue and tool policy as normal requests.
+
 ## Validation
 
 ```bash
@@ -62,5 +73,6 @@ pnpm build
 - Video generation is asynchronous and may take several minutes. DangBot polls OpenRouter and returns the generated `.mp4` as a file when it is ready.
 - Web search uses OpenRouter's web search tool by default when `search.enabled` is true. Brave Search remains available with `search.provider: brave` and `search.braveApiKey`.
 - Search prompts include the current Beijing date/time and add a date anchor for time-sensitive queries, so relative phrases such as “today” and “this week” are interpreted against the current Beijing date.
+- `pnpm audit --prod` is expected to pass. The project pins safe overrides and small local compatibility shims for legacy transitive packages in the Wechaty/FileBox chains; revisit these shims when upstream packages publish maintained replacements.
 - Different Wechaty puppet providers have different reliability and platform constraints. Keep the adapter boundary intact when switching providers.
 - `config/local.yaml`, `data/`, `logs/`, and `*.memory-card.json` are intentionally ignored by git.
