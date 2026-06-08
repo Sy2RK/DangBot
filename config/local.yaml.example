@@ -2,14 +2,15 @@ bot:
   name: DangBot
   mentionAliases:
     - DangBot
+    - 小当
 wechat:
   puppet: ${WECHATY_PUPPET:-wechaty-puppet-wechat4u}
   puppetOptions: {}
 llm:
   baseURL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
   apiKey: ${OPENAI_API_KEY:-}
-  textModel: ${OPENAI_TEXT_MODEL:-qwen/qwen3.6-plus}
-  visionModel: ${OPENAI_VISION_MODEL:-qwen/qwen3.6-plus}
+  textModel: ${OPENAI_TEXT_MODEL:-qwen/qwen3.7-plus}
+  visionModel: ${OPENAI_VISION_MODEL:-qwen/qwen3.7-plus}
   imageModel: ${OPENAI_IMAGE_MODEL:-bytedance-seed/seedream-4.5}
   videoModel: ${OPENAI_VIDEO_MODEL:-bytedance/seedance-2.0}
 search:
@@ -52,7 +53,9 @@ auth:
   systemAdmins: []
   allowTopicRoomBinding: false
   rooms:
-    - id: optional-wechat-room-id
+    - stableId: optional-stable-room-id
+      id: optional-wechat-runtime-room-id
+      runtimeIds: []
       topic: 目标微信群名称
       enabled: true
       admins: []

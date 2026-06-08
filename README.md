@@ -10,7 +10,7 @@ cp config/local.yaml.example config/local.yaml
 pnpm dev
 ```
 
-Fill `config/local.yaml` before running against a real WeChat account. The bot only serves authorized rooms. Prefer stable room IDs in config; topic-only binding is disabled by default because group names are not unique. A room can be enabled directly in config; if no admins are configured, DangBot runs in adminless mode.
+Fill `config/local.yaml` before running against a real WeChat account. The bot only serves authorized rooms. Prefer a stable `stableId` per real group and put Wechaty runtime room IDs under `id`/`runtimeIds`; topic-only binding is disabled by default because group names are not unique. A room can be enabled directly in config; if no admins are configured, DangBot runs in adminless mode.
 
 Sensitive local files are ignored by git: `config/local.yaml`, `data/`, `logs/`, and Wechaty memory-card files.
 
@@ -19,15 +19,16 @@ Sensitive local files are ignored by git: `config/local.yaml`, `data/`, `logs/`,
 All commands must mention the bot, for example `@DangBot 状态`.
 
 - `状态`: show bot status.
+- `/health` / `自检`: run a local self-check and report each capability in DangBot's cat voice.
 - `清空上下文`: clear the caller's context.
 - `记住 ...`: add a persistent memory for the caller in this room.
 - `全局记住 ...`: add a persistent global memory used for all callers.
 - `我的记忆` / `全局记忆`: show persistent memories.
 - `清空我的记忆` / `清空全局记忆`: clear persistent memories.
-- `提醒我 10分钟后 喝水` / `提醒我每天 09:00 喝水`: create a reminder. Creating, pausing, resuming, and deleting automations require a group admin or system admin.
-- `定时 每天 09:00 总结群聊` / `自动化 每30分钟 联网搜索 Qwen 最新消息`: create a recurring scheduled agent request.
+- `提醒我 10分钟后 喝水` / `设置提醒 10分钟后 喝水` / `提醒我每天 09:00 喝水`: create a reminder. Creating, pausing, resuming, and deleting automations require a group admin or system admin when admins are configured; adminless rooms allow normal members to manage them.
+- `定时 每天 09:00 总结群聊` / `设置定时任务 每天 09:00 总结群聊` / `自动化 每30分钟 联网搜索 Qwen 最新消息`: create a recurring scheduled agent request.
 - `自动化列表`: list this room's automations.
-- `暂停 auto_xxx` / `恢复 auto_xxx` / `删除 auto_xxx`: manage an automation by ID.
+- `暂停第1个` / `恢复第1个` / `删除第1个`: manage an automation by its position in `自动化列表`.
 - `生成图片 ...` / `画一张 ...` / `出图 ...`: generate an image. The default OpenRouter model is `bytedance-seed/seedream-4.5`.
 - `生成视频 ...` / `做个视频 ...` / `出视频 ...`: generate a short video. The default OpenRouter model is `bytedance/seedance-2.0`. Prompts such as `5s`, `10 秒`, or `五秒` are parsed and passed as the requested duration.
 - Send an image and ask `把这张图动起来`: generate an image-to-video result from that image.
@@ -56,7 +57,7 @@ Manual memories are stored separately from automatic summaries, so explicit `记
 - Built-in tool calls such as web search, file analysis, image/video analysis, and image/video generation are registered in a tool registry and recorded in SQLite.
 - `tools.policy.denyTools` can disable specific tools globally, for example `web.search`; `roomToolOverrides` can scope allow/deny rules to a room.
 - High-risk tools, including video generation, require approval when an approver is configured. Adminless mode keeps the earlier no-approval behavior.
-- Automations support one-time reminders, daily schedules, weekly schedules, and fixed intervals. Due automations are dispatched after the Wechaty adapter starts and reuse the same task queue and tool policy as normal requests.
+- Automation definitions are parsed by the text LLM into strict JSON, then validated locally. They support one-time reminders, daily schedules, weekly schedules, and fixed intervals. Before 04:00 local time, `第二天` is treated as the same calendar day for late-night scheduling. Due automations are dispatched after the Wechaty adapter starts and reuse the same task queue and tool policy as normal requests.
 
 ## Validation
 

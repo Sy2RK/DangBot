@@ -1,4 +1,5 @@
 import type { Logger } from 'pino';
+import type { ChatTurn, OpenAICompatibleClient } from '../services/llm/openaiCompatibleClient.js';
 import type { AppDatabase } from '../storage/database.js';
 import type {
   AppConfig,
@@ -11,6 +12,7 @@ import type {
 import { formatPlainList } from '../core/replyStyle.js';
 
 const maxScheduleOffsetMs = 10 * 366 * 24 * 60 * 60 * 1000;
+const automationParseTemperature = 0;
 
 export interface AutomationDefinition {
   name: string;
@@ -127,34 +129,86 @@ export class AutomationScheduler {
   }
 }
 
-export function parseAutomationDefinition(
+export async function parseAutomationDefinitionWithLlm(
   rawText: string,
-  options: { now?: Date; timezone: string; defaultRequestType?: RequestKind }
-): AutomationDefinition | undefined {
+  options: {
+    now?: Date;
+    timezone: string;
+    defaultRequestType?: RequestKind;
+    llm: OpenAICompatibleClient;
+    logger: Logger;
+    signal?: AbortSignal;
+  }
+): Promise<AutomationDefinition | undefined> {
   const now = options.now ?? new Date();
   const timezone = options.timezone;
-  const { body, requestedReminder } = stripAutomationPrefix(rawText);
-  if (!body) return undefined;
+  if (!rawText.trim()) return undefined;
 
-  const parsed = parseSchedule(body, now, timezone);
+  if (!options.llm.configured()) {
+    options.logger.warn('LLM is not configured; cannot parse automation definition');
+    return undefined;
+  }
+
+  try {
+    const raw = await options.llm.chat(buildAutomationParseMessages(rawText, now, timezone), options.signal, {
+      temperature: automationParseTemperature
+    });
+    const definition = parseAutomationDefinitionFromLlmOutput(raw, {
+      now,
+      timezone,
+      defaultRequestType: options.defaultRequestType,
+      rawText
+    });
+    if (!definition) {
+      options.logger.warn({ raw }, 'LLM returned an invalid automation definition');
+    }
+    return definition;
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    options.logger.warn({ error }, 'failed to parse automation definition with LLM');
+    return undefined;
+  }
+}
+
+export function parseAutomationDefinitionFromLlmOutput(
+  rawText: string,
+  options: { now?: Date; timezone: string; defaultRequestType?: RequestKind; rawText?: string }
+): AutomationDefinition | undefined {
+  const parsed = parseJsonObject(cleanLlmJsonOutput(rawText));
   if (!parsed) return undefined;
 
-  const prompt = stripActionPrefix(parsed.prompt);
-  if (!prompt) return undefined;
+  const valid = readBoolean(parsed, 'valid');
+  if (valid === false) return undefined;
 
-  const kind: AutomationKind =
-    requestedReminder || parsed.requestedReminder ? 'reminder' : 'scheduled_prompt';
+  const kind = normalizeAutomationKind(readString(parsed, 'kind'));
+  const prompt = normalizePrompt(readString(parsed, 'prompt'));
+  const schedule = readRecord(parsed, 'schedule');
+  if (!kind || !prompt || !schedule) return undefined;
+
+  const now = options.now ?? new Date();
+  const scheduleParts = buildScheduleFromLlm(schedule, now, options.timezone, {
+    forceCurrentDate: shouldTreatSecondDayAsToday(options.rawText, now, options.timezone)
+      ? zonedParts(now, options.timezone)
+      : undefined
+  });
+  if (!scheduleParts) return undefined;
+
   const requestType = kind === 'reminder' ? 'qa' : (options.defaultRequestType ?? 'qa');
 
   return {
     name: buildAutomationName(kind, prompt),
     kind,
     requestType,
-    scheduleType: parsed.scheduleType,
-    scheduleSpec: parsed.scheduleSpec,
-    timezone,
+    scheduleType: scheduleParts.scheduleType,
+    scheduleSpec: scheduleParts.scheduleSpec,
+    timezone: options.timezone,
     prompt,
-    nextRunAt: computeNextRun(parsed.scheduleType, parsed.scheduleSpec, now, timezone)
+    nextRunAt: computeNextRun(
+      scheduleParts.scheduleType,
+      scheduleParts.scheduleSpec,
+      now,
+      options.timezone
+    )
   };
 }
 
@@ -180,150 +234,346 @@ export function parseScheduleSpec(scheduleSpecJson: string): AutomationScheduleS
 
 export function formatAutomationList(automations: AutomationRecord[]): string {
   return formatPlainList(
-    '自动化列表',
+    '小当的小闹钟',
     automations.map((automation) => {
       const spec = parseScheduleSpec(automation.scheduleSpecJson);
-      const next = automation.nextRunAt ? formatDateTime(automation.nextRunAt, automation.timezone) : '无';
-      return `${automation.id} ${statusLabel(automation.status)} ${kindLabel(automation.kind)} ${spec.label} ${automation.prompt} 下次：${next}`;
+      const next = formatAutomationRunAt(automation.nextRunAt, automation.timezone);
+      return `${statusLabel(automation.status)} ${kindLabel(automation.kind)}，${spec.label}，${automation.prompt}。下次蹲点：${next}`;
     }),
-    '自动化列表还是空的。'
+    '小当的小闹钟还是空的，尾巴先收好。'
   );
+}
+
+export function formatAutomationRunAt(iso: string | null | undefined, timezone: string): string {
+  return iso ? formatDateTime(iso, timezone) : '无';
 }
 
 export function serializeScheduleSpec(spec: AutomationScheduleSpec): string {
   return JSON.stringify(spec);
 }
 
-function parseSchedule(
-  text: string,
+function buildAutomationParseMessages(rawText: string, now: Date, timezone: string): ChatTurn[] {
+  const parts = zonedParts(now, timezone);
+  const currentLocal = `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)} ${pad2(parts.hour)}:${pad2(parts.minute)}:${pad2(parts.second)} 周${weekdayLabel(parts.weekday)}`;
+  return [
+    {
+      role: 'system',
+      content: [
+        '你是小当机器人的自动化定时任务解析器，只负责把用户话术解析成内部 JSON，不要回答用户问题。',
+        '必须只输出一个 JSON 对象，不要 Markdown，不要解释，不要多余文字。',
+        '如果用户没有表达创建提醒、定时任务、自动化，或缺少时间/频率/要做的事，输出 {"valid":false,"reason":"..."}。',
+        '合法 JSON schema：',
+        '{"valid":true,"kind":"reminder|scheduled_prompt","prompt":"要提醒或要执行的内容","schedule":{"type":"once_relative|once_absolute|daily|weekly|interval"}}',
+        'kind 规则：只提醒一句话或事项用 reminder；让机器人定期总结、搜索、生成、分析、执行请求用 scheduled_prompt。',
+        'prompt 必须去掉“设置定时任务/提醒我/定时/自动化”等命令词和时间表达，只保留真正要提醒或执行的内容。',
+        'schedule 规则：',
+        'once_relative：{"type":"once_relative","amount":10,"unit":"minute"}，用于 10 分钟后、2 小时后、3 天后。',
+        'once_absolute：{"type":"once_absolute","date":"YYYY-MM-DD","time":"HH:mm"}，用于今天/明天/具体日期的单次任务；相对日期必须按当前本地时间换算成具体日期。',
+        '深夜适配：如果当前本地时间早于 04:00，用户说“第二天、第2天、第二日”时，按当天处理，不要按明天处理。',
+        'daily：{"type":"daily","time":"HH:mm"}，用于每天/每日。',
+        'weekly：{"type":"weekly","weekday":1,"time":"HH:mm"}，weekday 使用 1=周一 ... 7=周日。',
+        'interval：{"type":"interval","amount":30,"unit":"minute"}，用于每 30 分钟、每 2 小时、每 1 天重复。',
+        'unit 只允许 minute、hour、day。时间使用 24 小时制。不要输出 nextRunAt。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        `当前时区：${timezone}`,
+        `当前本地时间：${currentLocal}`,
+        `当前 UTC ISO：${now.toISOString()}`,
+        `用户原文：${rawText}`,
+        '请解析这个自动化或提醒。'
+      ].join('\n')
+    }
+  ];
+}
+
+function buildScheduleFromLlm(
+  schedule: Record<string, unknown>,
   now: Date,
-  timezone: string
+  timezone: string,
+  options: { forceCurrentDate?: { year: number; month: number; day: number } } = {}
 ):
   | {
       scheduleType: AutomationScheduleType;
       scheduleSpec: AutomationScheduleSpec;
-      prompt: string;
-      requestedReminder: boolean;
     }
   | undefined {
-  const normalized = text.trim();
+  const scheduleType = normalizeLlmScheduleType(readString(schedule, 'type'), schedule);
+  if (!scheduleType) return undefined;
 
-  const intervalOnce = normalized.match(/^(\d+)\s*(分钟|分|小时|钟头|天)后\s*(.+)$/);
-  if (intervalOnce?.[1] && intervalOnce[2] && intervalOnce[3]) {
-    const everyMs = durationMs(Number(intervalOnce[1]), intervalOnce[2]);
+  if (scheduleType === 'once_relative') {
+    const amount = readPositiveInteger(schedule, 'amount');
+    const unit = normalizeDurationUnit(readString(schedule, 'unit'));
+    if (!amount || !unit) return undefined;
+    const everyMs = durationMs(amount, unit);
     if (!everyMs) return undefined;
-    const prompt = intervalOnce[3].trim();
     return {
       scheduleType: 'once',
       scheduleSpec: {
         type: 'once',
         at: new Date(now.getTime() + everyMs).toISOString(),
-        label: `${intervalOnce[1]}${intervalOnce[2]}后`
-      },
-      prompt,
-      requestedReminder: startsAsReminder(prompt)
+        label: `${amount}${unit}后`
+      }
     };
   }
 
-  const absolute = normalized.match(
-    /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+(\d{1,2})[:：](\d{1,2})\s+(.+)$/
-  );
-  if (absolute?.[1] && absolute[2] && absolute[3] && absolute[4] && absolute[5] && absolute[6]) {
-    const year = Number(absolute[1]);
-    const month = Number(absolute[2]);
-    const day = Number(absolute[3]);
-    const hour = Number(absolute[4]);
-    const minute = Number(absolute[5]);
-    if (!validDate(year, month, day)) return undefined;
-    if (!validClock(hour, minute)) return undefined;
-    const at = makeZonedDate(year, month, day, hour, minute, timezone);
+  if (scheduleType === 'once_absolute') {
+    const at = readAbsoluteDate(schedule, timezone, options.forceCurrentDate);
+    if (!at || !withinScheduleHorizon(at, now)) return undefined;
     return {
       scheduleType: 'once',
       scheduleSpec: {
         type: 'once',
         at: at.toISOString(),
-        label: `${absolute[1]}-${pad2(Number(absolute[2]))}-${pad2(Number(absolute[3]))} ${pad2(hour)}:${pad2(minute)}`
-      },
-      prompt: absolute[6].trim(),
-      requestedReminder: startsAsReminder(absolute[6])
+        label: formatDateTime(at.toISOString(), timezone)
+      }
     };
   }
 
-  const relativeDay = normalized.match(/^(今天|明天|后天)\s*(\d{1,2})(?:[:：点](\d{1,2})?)?分?\s+(.+)$/);
-  if (relativeDay?.[1] && relativeDay[2] && relativeDay[4]) {
-    const parts = zonedParts(now, timezone);
-    const dayOffset = relativeDay[1] === '今天' ? 0 : relativeDay[1] === '明天' ? 1 : 2;
-    const targetDate = addUtcDays(parts.year, parts.month, parts.day, dayOffset);
-    const hour = Number(relativeDay[2]);
-    const minute = Number(relativeDay[3] ?? 0);
-    if (!validClock(hour, minute)) return undefined;
-    const at = makeZonedDate(
-      targetDate.year,
-      targetDate.month,
-      targetDate.day,
-      hour,
-      minute,
-      timezone
-    );
-    return {
-      scheduleType: 'once',
-      scheduleSpec: {
-        type: 'once',
-        at: at.toISOString(),
-        label: `${relativeDay[1]} ${pad2(hour)}:${pad2(minute)}`
-      },
-      prompt: relativeDay[4].trim(),
-      requestedReminder: startsAsReminder(relativeDay[4])
-    };
-  }
-
-  const daily = normalized.match(/^(每天|每日)\s*(\d{1,2})(?:[:：点](\d{1,2})?)?分?\s+(.+)$/);
-  if (daily?.[2] && daily[4]) {
-    const hour = Number(daily[2]);
-    const minute = Number(daily[3] ?? 0);
-    if (!validClock(hour, minute)) return undefined;
-    const label = `每天 ${pad2(hour)}:${pad2(minute)}`;
+  if (scheduleType === 'daily') {
+    const clock = readClock(schedule);
+    if (!clock) return undefined;
     return {
       scheduleType: 'daily',
-      scheduleSpec: { type: 'daily', hour, minute, label },
-      prompt: daily[4].trim(),
-      requestedReminder: startsAsReminder(daily[4])
+      scheduleSpec: {
+        type: 'daily',
+        hour: clock.hour,
+        minute: clock.minute,
+        label: `每天 ${pad2(clock.hour)}:${pad2(clock.minute)}`
+      }
     };
   }
 
-  const weekly = normalized.match(/^每周([一二三四五六日天1-7])\s*(\d{1,2})(?:[:：点](\d{1,2})?)?分?\s+(.+)$/);
-  if (weekly?.[1] && weekly[2] && weekly[4]) {
-    const hour = Number(weekly[2]);
-    const minute = Number(weekly[3] ?? 0);
-    if (!validClock(hour, minute)) return undefined;
-    const weekday = parseWeekday(weekly[1]);
-    if (!weekday) return undefined;
-    const label = `每周${weekdayLabel(weekday)} ${pad2(hour)}:${pad2(minute)}`;
+  if (scheduleType === 'weekly') {
+    const clock = readClock(schedule);
+    const weekday = normalizeWeekday(readString(schedule, 'weekday') ?? readNumber(schedule, 'weekday'));
+    if (!clock || !weekday) return undefined;
+    const label = `每周${weekdayLabel(weekday)} ${pad2(clock.hour)}:${pad2(clock.minute)}`;
     return {
       scheduleType: 'weekly',
-      scheduleSpec: { type: 'weekly', weekday, hour, minute, label },
-      prompt: weekly[4].trim(),
-      requestedReminder: startsAsReminder(weekly[4])
-    };
-  }
-
-  const interval = normalized.match(/^每\s*(\d+)\s*(分钟|分|小时|钟头|天)\s+(.+)$/);
-  if (interval?.[1] && interval[2] && interval[3]) {
-    const everyMs = durationMs(Number(interval[1]), interval[2]);
-    if (!everyMs) return undefined;
-    return {
-      scheduleType: 'interval',
       scheduleSpec: {
-        type: 'interval',
-        everyMs,
-        label: `每${interval[1]}${interval[2]}`
-      },
-      prompt: interval[3].trim(),
-      requestedReminder: startsAsReminder(interval[3])
+        type: 'weekly',
+        weekday,
+        hour: clock.hour,
+        minute: clock.minute,
+        label
+      }
     };
   }
 
+  const amount = readPositiveInteger(schedule, 'amount');
+  const unit = normalizeDurationUnit(readString(schedule, 'unit'));
+  if (!amount || !unit) return undefined;
+  const everyMs = durationMs(amount, unit);
+  if (!everyMs) return undefined;
+  return {
+    scheduleType: 'interval',
+    scheduleSpec: {
+      type: 'interval',
+      everyMs,
+      label: `每${amount}${unit}`
+    }
+  };
+}
+
+function cleanLlmJsonOutput(rawText: string): string {
+  return rawText
+    .trim()
+    .replaceAll('```json', '')
+    .replaceAll('```JSON', '')
+    .replaceAll('```', '')
+    .trim();
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return undefined;
+
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    return readRecordValue(parsed);
+  } catch {
+    return undefined;
+  }
+}
+
+function readRecord(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  return readRecordValue(record[key]);
+}
+
+function readRecordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function readNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function readBoolean(record: Record<string, unknown>, key: string): boolean | undefined {
+  const value = record[key];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function readPositiveInteger(record: Record<string, unknown>, key: string): number | undefined {
+  const value = readNumber(record, key);
+  return value && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function normalizePrompt(text?: string): string | undefined {
+  const prompt = text?.replace(/\s+/g, ' ').trim();
+  return prompt ? prompt : undefined;
+}
+
+function normalizeAutomationKind(value?: string): AutomationKind | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized === 'reminder' || normalized === '提醒') return 'reminder';
+  if (
+    normalized === 'scheduled_prompt' ||
+    normalized === 'scheduled' ||
+    normalized === 'automation' ||
+    normalized === '定时任务' ||
+    normalized === '自动化'
+  ) {
+    return 'scheduled_prompt';
+  }
   return undefined;
+}
+
+type LlmScheduleType = 'once_relative' | 'once_absolute' | 'daily' | 'weekly' | 'interval';
+
+function normalizeLlmScheduleType(
+  value: string | undefined,
+  schedule: Record<string, unknown>
+): LlmScheduleType | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'once_relative' || normalized === 'relative' || normalized === 'after') {
+    return 'once_relative';
+  }
+  if (normalized === 'once_absolute' || normalized === 'absolute' || normalized === 'at') {
+    return 'once_absolute';
+  }
+  if (normalized === 'daily' || normalized === 'every_day') return 'daily';
+  if (normalized === 'weekly' || normalized === 'every_week') return 'weekly';
+  if (normalized === 'interval' || normalized === 'every') return 'interval';
+  if (normalized === 'once') {
+    return readString(schedule, 'at') || readString(schedule, 'date')
+      ? 'once_absolute'
+      : 'once_relative';
+  }
+  return undefined;
+}
+
+function shouldTreatSecondDayAsToday(
+  rawText: string | undefined,
+  now: Date,
+  timezone: string
+): boolean {
+  if (!rawText || !/第\s*[二2]\s*[天日]/.test(rawText)) return false;
+  return zonedParts(now, timezone).hour < 4;
+}
+
+function readAbsoluteDate(
+  schedule: Record<string, unknown>,
+  timezone: string,
+  forceDate?: { year: number; month: number; day: number }
+): Date | undefined {
+  const at = readString(schedule, 'at') ?? readString(schedule, 'datetime') ?? readString(schedule, 'dateTime');
+  if (at) {
+    const date = new Date(at);
+    if (Number.isNaN(date.getTime())) return undefined;
+    if (!forceDate) return date;
+    const clock = readClock(schedule) ?? clockFromDate(date, timezone);
+    return makeZonedDate(forceDate.year, forceDate.month, forceDate.day, clock.hour, clock.minute, timezone);
+  }
+
+  const dateParts = forceDate ?? parseDateParts(readString(schedule, 'date'));
+  const clock = readClock(schedule);
+  if (!dateParts || !clock) return undefined;
+  return makeZonedDate(dateParts.year, dateParts.month, dateParts.day, clock.hour, clock.minute, timezone);
+}
+
+function clockFromDate(date: Date, timezone: string): { hour: number; minute: number } {
+  const parts = zonedParts(date, timezone);
+  return { hour: parts.hour, minute: parts.minute };
+}
+
+function parseDateParts(value?: string): { year: number; month: number; day: number } | undefined {
+  const parts = value?.trim().replaceAll('/', '-').split('-') ?? [];
+  if (parts.length !== 3) return undefined;
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  return validDate(year, month, day) ? { year, month, day } : undefined;
+}
+
+function readClock(record: Record<string, unknown>): { hour: number; minute: number } | undefined {
+  const hour = readNumber(record, 'hour');
+  const minute = readNumber(record, 'minute') ?? 0;
+  if (hour !== undefined && validClock(hour, minute)) {
+    return { hour, minute };
+  }
+
+  const time = readString(record, 'time');
+  if (!time) return undefined;
+  const parts = time.trim().replace('：', ':').replace('点', ':').replace('分', '').split(':');
+  if (parts.length < 1 || parts.length > 2) return undefined;
+  const parsedHour = Number(parts[0]);
+  const parsedMinute = Number(parts[1] ?? 0);
+  return validClock(parsedHour, parsedMinute)
+    ? { hour: parsedHour, minute: parsedMinute }
+    : undefined;
+}
+
+function normalizeDurationUnit(value?: string): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (['minute', 'minutes', 'min', 'mins', 'm', '分钟', '分'].includes(normalized)) return '分钟';
+  if (['hour', 'hours', 'h', '小时', '钟头'].includes(normalized)) return '小时';
+  if (['day', 'days', 'd', '天'].includes(normalized)) return '天';
+  return undefined;
+}
+
+function normalizeWeekday(value: string | number | undefined): number | undefined {
+  if (typeof value === 'number') return value >= 1 && value <= 7 ? value : undefined;
+  if (!value) return undefined;
+  const parsed = parseWeekday(value);
+  if (parsed) return parsed;
+  const normalized = value.trim().toLowerCase();
+  const map: Record<string, number> = {
+    monday: 1,
+    mon: 1,
+    tuesday: 2,
+    tue: 2,
+    wednesday: 3,
+    wed: 3,
+    thursday: 4,
+    thu: 4,
+    friday: 5,
+    fri: 5,
+    saturday: 6,
+    sat: 6,
+    sunday: 7,
+    sun: 7
+  };
+  return map[normalized];
+}
+
+function withinScheduleHorizon(date: Date, now: Date): boolean {
+  const offset = date.getTime() - now.getTime();
+  return Number.isFinite(offset) && offset <= maxScheduleOffsetMs;
 }
 
 function computeNextRun(
@@ -366,27 +616,6 @@ function computeNextRun(
   return candidate.toISOString();
 }
 
-function stripAutomationPrefix(text: string): { body: string; requestedReminder: boolean } {
-  const normalized = text.trim().replace(/\s+/g, ' ');
-  const reminder = normalized.match(/^(?:创建提醒|提醒我|提醒|remind me|remind)[:：]?\s*(.+)$/i);
-  if (reminder?.[1]) return { body: reminder[1].trim(), requestedReminder: true };
-
-  const scheduled = normalized.match(/^(?:创建自动化|新增自动化|自动化|定时任务|定时|schedule)[:：]?\s*(.+)$/i);
-  if (scheduled?.[1]) return { body: scheduled[1].trim(), requestedReminder: false };
-
-  return { body: normalized, requestedReminder: startsAsReminder(normalized) };
-}
-
-function stripActionPrefix(text: string): string {
-  return text
-    .replace(/^(?:提醒我|提醒|执行|做一下|做|帮我|请|麻烦)[:：]?\s*/i, '')
-    .trim();
-}
-
-function startsAsReminder(text: string): boolean {
-  return /^(?:提醒我|提醒|remind me|remind)/i.test(text.trim());
-}
-
 function durationMs(amount: number, unit: string): number | undefined {
   if (!Number.isFinite(amount) || amount <= 0) return undefined;
   const multiplier =
@@ -422,24 +651,24 @@ function buildAutomationName(kind: AutomationKind, prompt: string): string {
 function statusLabel(status: AutomationRecord['status']): string {
   switch (status) {
     case 'active':
-      return '启用';
+      return '醒着';
     case 'paused':
-      return '暂停';
+      return '趴着';
     case 'completed':
-      return '已完成';
+      return '跑完啦';
     case 'failed':
-      return '失败';
+      return '摔了一跤';
   }
 }
 
 function kindLabel(kind: AutomationKind): string {
   switch (kind) {
     case 'reminder':
-      return '提醒';
+      return '小提醒';
     case 'scheduled_prompt':
-      return '定时请求';
+      return '定时小爪';
     case 'scheduled_tool':
-      return '定时工具';
+      return '工具小爪';
   }
 }
 

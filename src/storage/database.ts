@@ -63,6 +63,18 @@ export class AppDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS room_bindings (
+        runtime_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        topic TEXT,
+        source TEXT NOT NULL DEFAULT 'config',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE ON UPDATE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_room_bindings_room ON room_bindings(room_id);
+
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         display_name TEXT,
@@ -253,6 +265,14 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_memories_source
         ON memories(scope, room_id, user_id, source);
     `);
+    this.db.exec(`
+      INSERT OR IGNORE INTO room_bindings (
+        runtime_id, room_id, topic, source, created_at, updated_at
+      )
+      SELECT id, id, topic, 'legacy', created_at, updated_at
+      FROM rooms
+      WHERE id NOT LIKE 'topic:%';
+    `);
   }
 
   seedConfig(config: AppConfig): void {
@@ -281,7 +301,7 @@ export class AppDatabase {
 
   upsertConfiguredRoom(roomConfig: RoomConfig): RoomState {
     const now = nowIso();
-    const roomId = roomConfig.id ?? `topic:${roomConfig.topic ?? randomUUID()}`;
+    const roomId = roomConfig.stableId ?? roomConfig.id ?? `topic:${roomConfig.topic ?? randomUUID()}`;
     this.db
       .prepare(
         `
@@ -301,6 +321,16 @@ export class AppDatabase {
         now
       });
 
+    const runtimeIds = new Set(
+      [roomConfig.id, ...(roomConfig.runtimeIds ?? [])].filter((runtimeId): runtimeId is string =>
+        Boolean(runtimeId)
+      )
+    );
+    for (const runtimeId of runtimeIds) {
+      this.mergeRoomData(runtimeId, roomId);
+      this.upsertRoomBinding(runtimeId, roomId, roomConfig.topic, 'config');
+    }
+
     for (const adminId of roomConfig.admins) {
       this.upsertUser(adminId, undefined, 'member');
       this.setRoomMemberRole(roomId, adminId, 'group_admin');
@@ -314,6 +344,18 @@ export class AppDatabase {
     topic?: string,
     options: { allowTopicBinding?: boolean } = {}
   ): RoomState | undefined {
+    const boundRoom = this.getRoomByRuntimeId(roomId);
+    if (boundRoom) {
+      if (topic && boundRoom.topic !== topic) {
+        this.db
+          .prepare('UPDATE rooms SET topic = ?, updated_at = ? WHERE id = ?')
+          .run(topic, nowIso(), boundRoom.id);
+        this.upsertRoomBinding(roomId, boundRoom.id, topic, 'observed');
+        return this.getRoomById(boundRoom.id);
+      }
+      return boundRoom;
+    }
+
     let room = this.getRoomById(roomId);
     if (room) {
       if (topic && room.topic !== topic) {
@@ -322,28 +364,20 @@ export class AppDatabase {
           .run(topic, nowIso(), roomId);
         room = this.getRoomById(roomId);
       }
+      if (!room) return undefined;
+      this.upsertRoomBinding(roomId, room.id, topic ?? room.topic, 'legacy');
       return room;
     }
 
     if (!topic || !options.allowTopicBinding) return undefined;
-    const byTopic = this.db
-      .prepare('SELECT * FROM rooms WHERE topic = ? AND authorized = 1 LIMIT 1')
-      .get(topic) as DbRoom | undefined;
+    const candidates = this.db
+      .prepare('SELECT * FROM rooms WHERE topic = ? AND authorized = 1 ORDER BY created_at')
+      .all(topic) as DbRoom[];
+    if (candidates.length !== 1) return undefined;
+
+    const byTopic = candidates[0];
     if (!byTopic) return undefined;
-
-    if (byTopic.id.startsWith('topic:')) {
-      const tx = this.db.transaction(() => {
-        this.db
-          .prepare('UPDATE rooms SET id = ?, topic = ?, updated_at = ? WHERE id = ?')
-          .run(roomId, topic, nowIso(), byTopic.id);
-        this.db
-          .prepare('UPDATE room_members SET room_id = ? WHERE room_id = ?')
-          .run(roomId, byTopic.id);
-      });
-      tx();
-      return this.getRoomById(roomId);
-    }
-
+    this.upsertRoomBinding(roomId, byTopic.id, topic, 'topic');
     return normalizeRoom(byTopic, this.getRoomAdmins(byTopic.id));
   }
 
@@ -353,6 +387,79 @@ export class AppDatabase {
       | undefined;
     if (!row) return undefined;
     return normalizeRoom(row, this.getRoomAdmins(roomId));
+  }
+
+  private getRoomByRuntimeId(runtimeId: string): RoomState | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT rooms.*
+        FROM room_bindings
+        JOIN rooms ON rooms.id = room_bindings.room_id
+        WHERE room_bindings.runtime_id = ?
+      `
+      )
+      .get(runtimeId) as DbRoom | undefined;
+    if (!row) return undefined;
+    return normalizeRoom(row, this.getRoomAdmins(row.id));
+  }
+
+  private upsertRoomBinding(
+    runtimeId: string,
+    roomId: string,
+    topic: string | undefined,
+    source: 'config' | 'legacy' | 'observed' | 'topic'
+  ): void {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO room_bindings (runtime_id, room_id, topic, source, created_at, updated_at)
+        VALUES (@runtimeId, @roomId, @topic, @source, @now, @now)
+        ON CONFLICT(runtime_id) DO UPDATE SET
+          room_id = excluded.room_id,
+          topic = COALESCE(excluded.topic, room_bindings.topic),
+          source = excluded.source,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run({ runtimeId, roomId, topic, source, now });
+  }
+
+  private mergeRoomData(sourceRoomId: string, targetRoomId: string): void {
+    if (sourceRoomId === targetRoomId || !this.getRoomById(sourceRoomId)) return;
+
+    this.db
+      .prepare(
+        `
+        INSERT OR IGNORE INTO room_members (room_id, user_id, role, created_at, updated_at)
+        SELECT @targetRoomId, user_id, role, created_at, updated_at
+        FROM room_members
+        WHERE room_id = @sourceRoomId
+      `
+      )
+      .run({ sourceRoomId, targetRoomId });
+    this.db.prepare('DELETE FROM room_members WHERE room_id = ?').run(sourceRoomId);
+
+    for (const tableName of roomScopedTables) {
+      this.db
+        .prepare(`UPDATE ${tableName} SET room_id = @targetRoomId WHERE room_id = @sourceRoomId`)
+        .run({ sourceRoomId, targetRoomId });
+    }
+
+    this.db
+      .prepare(
+        `
+        UPDATE room_bindings
+        SET room_id = @targetRoomId, updated_at = @now
+        WHERE room_id = @sourceRoomId
+      `
+      )
+      .run({ sourceRoomId, targetRoomId, now: nowIso() });
+
+    this.db
+      .prepare('UPDATE rooms SET authorized = 0, enabled = 0, updated_at = ? WHERE id = ?')
+      .run(nowIso(), sourceRoomId);
   }
 
   setRoomEnabled(roomId: string, enabled: boolean): void {
@@ -1131,6 +1238,18 @@ interface DbRoom {
   enabled: 0 | 1;
   authorized: 0 | 1;
 }
+
+const roomScopedTables = [
+  'messages',
+  'attachments',
+  'tasks',
+  'approvals',
+  'tool_calls',
+  'automations',
+  'contexts',
+  'memories',
+  'audit_logs'
+] as const;
 
 interface DbTask {
   id: string;

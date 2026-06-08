@@ -1,3 +1,5 @@
+import { constants as fsConstants } from 'node:fs';
+import { access } from 'node:fs/promises';
 import type { Logger } from 'pino';
 import { classifyRequestKind } from './intentClassifier.js';
 import { parseCommand } from './parser.js';
@@ -7,7 +9,8 @@ import { SlidingWindowRateLimiter } from '../domain/rateLimiter.js';
 import {
   computeNextRunForAutomation,
   formatAutomationList,
-  parseAutomationDefinition,
+  formatAutomationRunAt,
+  parseAutomationDefinitionWithLlm,
   serializeScheduleSpec
 } from '../domain/automations.js';
 import type { MemoryConsolidationService } from '../domain/memoryConsolidation.js';
@@ -68,6 +71,12 @@ interface TaskExecutionStep {
 interface TaskPlan {
   text: string;
   source: 'template' | 'llm';
+}
+
+interface HealthItem {
+  name: string;
+  state: 'ok' | 'warn' | 'off';
+  detail: string;
 }
 
 interface TaskProgressReporter {
@@ -141,8 +150,9 @@ export class BotRequestRouter {
 
     const command = parseCommand(message.mentionText);
     const role = this.db.getUserRole(room.id, message.senderId);
+    const adminless = room.admins.length === 0 && this.config.auth.systemAdmins.length === 0;
 
-    if (!canUseCommand(command, role, room)) {
+    if (!canUseCommand(command, role, room, { adminless })) {
       await this.replyPlain(responder, permissionMessage(command, room.enabled));
       this.db.addAudit({
         roomId: room.id,
@@ -162,6 +172,9 @@ export class BotRequestRouter {
         return;
       case 'status':
         await this.replyStatus(room.id, responder);
+        return;
+      case 'health':
+        await this.replyHealth(room.id, responder);
         return;
       case 'clear_user_context':
         await this.clearUserContext(room.id, message.senderId, responder);
@@ -372,6 +385,149 @@ export class BotRequestRouter {
     );
   }
 
+  private async replyHealth(roomId: string, responder: BotResponder): Promise<void> {
+    const items: HealthItem[] = [];
+    const room = this.db.getRoomById(roomId);
+
+    items.push({
+      name: '微信入口',
+      state: 'ok',
+      detail: '刚刚收到 /health，耳朵在线。'
+    });
+    items.push({
+      name: '本群授权',
+      state: room?.authorized ? 'ok' : 'warn',
+      detail: room?.authorized
+        ? `已授权，当前${room.enabled ? '醒着' : '睡着'}。`
+        : '没有读到授权记录。'
+    });
+
+    items.push(await this.databaseHealth(roomId));
+    items.push(await this.storageHealth());
+    items.push({
+      name: '任务队列',
+      state: 'ok',
+      detail: `运行中 ${this.queue.runningCount()}，等待 ${this.queue.pendingCount()}。`
+    });
+
+    const llmConfigured = this.llm.configured();
+    items.push({
+      name: 'LLM',
+      state: llmConfigured ? 'ok' : 'warn',
+      detail: llmConfigured
+        ? `文本模型 ${this.config.llm.textModel} 已配置。`
+        : '缺少 API key，问答和总结会受影响。'
+    });
+    items.push(this.webSearchHealth(llmConfigured));
+    items.push({
+      name: '图片能力',
+      state: llmConfigured && this.config.llm.imageModel ? 'ok' : 'off',
+      detail:
+        llmConfigured && this.config.llm.imageModel
+          ? `图片模型 ${this.config.llm.imageModel} 已配置。`
+          : '没有配置图片模型，先趴着。'
+    });
+    items.push({
+      name: '视频能力',
+      state: llmConfigured && this.config.llm.videoModel ? 'ok' : 'off',
+      detail:
+        llmConfigured && this.config.llm.videoModel
+          ? `视频模型 ${this.config.llm.videoModel} 已配置。`
+          : '没有配置视频模型，先趴着。'
+    });
+    items.push({
+      name: '自动化',
+      state: this.config.automations.enabled ? 'ok' : 'off',
+      detail: this.config.automations.enabled
+        ? `开着，本群自动化 ${this.db.listRoomAutomations(roomId).length} 个。`
+        : '配置里关闭了自动化。'
+    });
+    items.push({
+      name: '工具策略',
+      state: 'ok',
+      detail: `内置工具 ${this.tools.list().length} 个，网络工具${this.config.tools.policy.allowNetworkTools ? '可用' : '关闭'}，文件写入${this.config.tools.policy.allowFileWriteTools ? '可用' : '关闭'}。`
+    });
+
+    const hasWarning = items.some((item) => item.state === 'warn');
+    const active = items.filter((item) => item.state === 'ok').length;
+    const resting = items.filter((item) => item.state === 'off').length;
+    const lines = [
+      '小当自检完成，喵。',
+      `总体：${hasWarning ? '有项目需要铲屎官照看一下' : '猫爪稳稳，核心链路健康'}。健康 ${active} 项，休眠 ${resting} 项。`,
+      ...items.map(
+        (item, index) =>
+          `${index + 1}、${item.name}：${healthStateLabel(item.state)}。${item.detail}`
+      )
+    ];
+
+    this.db.addAudit({
+      roomId,
+      action: 'health_checked',
+      details: {
+        ok: active,
+        off: resting,
+        warn: items.length - active - resting
+      }
+    });
+    await this.replyPlain(responder, lines.join('\n'));
+  }
+
+  private async databaseHealth(roomId: string): Promise<HealthItem> {
+    try {
+      const recentTasks = this.db.listRoomTasks(roomId, 5);
+      return {
+        name: '数据库',
+        state: 'ok',
+        detail: `能读写记录，本群最近任务可读 ${recentTasks.length} 条。`
+      };
+    } catch (error) {
+      return {
+        name: '数据库',
+        state: 'warn',
+        detail: `读库失败：${error instanceof Error ? error.message : '未知错误'}。`
+      };
+    }
+  }
+
+  private async storageHealth(): Promise<HealthItem> {
+    const paths = [this.config.storage.uploadsDir, this.config.storage.outputsDir];
+    try {
+      await Promise.all(paths.map((path) => access(path, fsConstants.W_OK)));
+      return {
+        name: '文件缓存',
+        state: 'ok',
+        detail: '上传目录和输出目录都能写。'
+      };
+    } catch {
+      return {
+        name: '文件缓存',
+        state: 'warn',
+        detail: '上传目录或输出目录暂时不可写，文件类任务可能受影响。'
+      };
+    }
+  }
+
+  private webSearchHealth(llmConfigured: boolean): HealthItem {
+    if (!this.config.search.enabled) {
+      return {
+        name: '联网搜索',
+        state: 'off',
+        detail: '配置里关闭了搜索，先晒太阳。'
+      };
+    }
+
+    const configured =
+      this.config.search.provider === 'openrouter' ? llmConfigured : Boolean(this.webSearch?.configured());
+
+    return {
+      name: '联网搜索',
+      state: configured ? 'ok' : 'warn',
+      detail: configured
+        ? `搜索 provider=${this.config.search.provider} 已配置。`
+        : `搜索 provider=${this.config.search.provider} 未配好。`
+    };
+  }
+
   private async clearUserContext(
     roomId: string,
     userId: string,
@@ -498,9 +654,11 @@ export class BotRequestRouter {
       return;
     }
 
-    const definition = parseAutomationDefinition(command.automationText ?? '', {
+    const definition = await parseAutomationDefinitionWithLlm(command.automationText ?? '', {
       now: message.timestamp,
-      timezone: this.config.automations.timezone
+      timezone: this.config.automations.timezone,
+      llm: this.llm,
+      logger: this.logger
     });
     if (!definition) {
       await this.replyPlain(
@@ -573,9 +731,11 @@ export class BotRequestRouter {
     });
     await this.replyPlain(
       responder,
-      [`自动化创建好啦：${automation.id}`, automation.name, `下次触发：${automation.nextRunAt}`].join(
-        '\n'
-      )
+      [
+        '记好啦，喵。',
+        `${automationKindLine(automation)}：${automation.prompt}`,
+        `下次我会在：${formatAutomationRunAt(automation.nextRunAt, automation.timezone)}`
+      ].join('\n')
     );
   }
 
@@ -589,15 +749,15 @@ export class BotRequestRouter {
     userId: string,
     responder: BotResponder
   ): Promise<void> {
-    const automation = this.getRoomAutomation(command.automationId, roomId);
+    const automation = this.getRoomAutomation(command, roomId);
     if (!automation) {
-      await this.replyPlain(responder, '我没找到这个自动化，请带上 auto_ 开头的编号。');
+      await this.replyPlain(responder, automationNotFoundMessage());
       return;
     }
 
     this.db.updateAutomation(automation.id, { status: 'paused' });
     this.db.addAudit({ roomId, userId, action: 'automation_paused', details: { automationId: automation.id } });
-    await this.replyPlain(responder, `已暂停：${automation.id}`);
+    await this.replyPlain(responder, `好，我先把这只小闹钟按住了，喵。\n${automationKindLine(automation)}：${automation.prompt}`);
   }
 
   private async resumeAutomation(
@@ -606,13 +766,13 @@ export class BotRequestRouter {
     userId: string,
     responder: BotResponder
   ): Promise<void> {
-    const automation = this.getRoomAutomation(command.automationId, roomId);
+    const automation = this.getRoomAutomation(command, roomId);
     if (!automation) {
-      await this.replyPlain(responder, '我没找到这个自动化，请带上 auto_ 开头的编号。');
+      await this.replyPlain(responder, automationNotFoundMessage());
       return;
     }
     if (automation.scheduleType === 'once' && automation.status === 'completed') {
-      await this.replyPlain(responder, '一次性自动化已经完成，不能恢复。');
+      await this.replyPlain(responder, '这只一次性小闹钟已经跑完啦，叫不醒了喵。');
       return;
     }
 
@@ -624,7 +784,14 @@ export class BotRequestRouter {
       lastError: null
     });
     this.db.addAudit({ roomId, userId, action: 'automation_resumed', details: { automationId: automation.id } });
-    await this.replyPlain(responder, `已恢复：${automation.id}\n下次触发：${nextRunAt}`);
+    await this.replyPlain(
+      responder,
+      [
+        '好，我把这只小闹钟叫醒了，喵。',
+        `${automationKindLine(automation)}：${automation.prompt}`,
+        `下次我会在：${formatAutomationRunAt(nextRunAt, automation.timezone)}`
+      ].join('\n')
+    );
   }
 
   private async deleteAutomation(
@@ -633,22 +800,26 @@ export class BotRequestRouter {
     userId: string,
     responder: BotResponder
   ): Promise<void> {
-    const automation = this.getRoomAutomation(command.automationId, roomId);
+    const automation = this.getRoomAutomation(command, roomId);
     if (!automation) {
-      await this.replyPlain(responder, '我没找到这个自动化，请带上 auto_ 开头的编号。');
+      await this.replyPlain(responder, automationNotFoundMessage());
       return;
     }
 
     this.db.deleteAutomation(automation.id);
     this.db.addAudit({ roomId, userId, action: 'automation_deleted', details: { automationId: automation.id } });
-    await this.replyPlain(responder, `已删除：${automation.id}`);
+    await this.replyPlain(responder, `好，我把这只小闹钟叼走啦，喵。\n${automationKindLine(automation)}：${automation.prompt}`);
   }
 
-  private getRoomAutomation(automationId: string | undefined, roomId: string): AutomationRecord | undefined {
-    if (!automationId) return undefined;
-    const automation = this.db.getAutomation(automationId);
-    if (!automation || automation.roomId !== roomId) return undefined;
-    return automation;
+  private getRoomAutomation(command: ParsedCommand, roomId: string): AutomationRecord | undefined {
+    if (command.automationId) {
+      const automation = this.db.getAutomation(command.automationId);
+      if (!automation || automation.roomId !== roomId) return undefined;
+      return automation;
+    }
+
+    if (!command.automationIndex) return undefined;
+    return this.db.listRoomAutomations(roomId).at(command.automationIndex - 1);
   }
 
   private async cancelTask(
@@ -1508,6 +1679,25 @@ function permissionMessage(command: ParsedCommand, roomEnabled: boolean): string
   }
 
   return replyPhrases.operationUnavailable;
+}
+
+function automationKindLine(automation: AutomationRecord): string {
+  return automation.kind === 'reminder' ? '小提醒' : '定时小爪';
+}
+
+function automationNotFoundMessage(): string {
+  return '我没找到这只小闹钟，喵。先发“自动化列表”看看，再说“暂停第1个 / 恢复第1个 / 删除第1个”。';
+}
+
+function healthStateLabel(state: HealthItem['state']): string {
+  switch (state) {
+    case 'ok':
+      return '健康';
+    case 'warn':
+      return '要照看';
+    case 'off':
+      return '休眠';
+  }
 }
 
 function normalizeMemoryText(text?: string): string {

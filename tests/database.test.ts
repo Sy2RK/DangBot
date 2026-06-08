@@ -57,9 +57,145 @@ describe('AppDatabase', () => {
 
     expect(db.resolveRoom('actual-room-id', '重名群')).toBeUndefined();
     expect(db.resolveRoom('actual-room-id', '重名群', { allowTopicBinding: true })).toMatchObject({
-      id: 'actual-room-id',
+      id: 'topic:重名群',
       authorized: true
     });
+    expect(db.resolveRoom('actual-room-id')).toMatchObject({
+      id: 'topic:重名群',
+      authorized: true
+    });
+    db.close();
+  });
+
+  it('resolves changed runtime ids to a configured stable room', async () => {
+    const config = await makeTestConfig({
+      auth: {
+        systemAdmins: [],
+        rooms: [
+          {
+            stableId: 'stable-room',
+            id: 'runtime-old',
+            runtimeIds: ['runtime-new'],
+            topic: '测试群',
+            enabled: true,
+            admins: ['admin']
+          }
+        ]
+      }
+    });
+    const db = AppDatabase.memory();
+    db.seedConfig(config);
+
+    expect(db.resolveRoom('runtime-old', '测试群')).toMatchObject({
+      id: 'stable-room',
+      authorized: true,
+      enabled: true
+    });
+    expect(db.resolveRoom('runtime-new', '测试群')).toMatchObject({
+      id: 'stable-room',
+      authorized: true,
+      enabled: true
+    });
+    expect(db.getUserRole('stable-room', 'admin')).toBe('group_admin');
+    db.close();
+  });
+
+  it('merges old runtime room data into the configured stable room', async () => {
+    const db = AppDatabase.memory();
+    db.seedConfig(
+      await makeTestConfig({
+        auth: {
+          systemAdmins: [],
+          rooms: [{ id: 'runtime-old', topic: '测试群', enabled: true, admins: [] }]
+        }
+      })
+    );
+    db.appendContext({
+      scope: 'user',
+      roomId: 'runtime-old',
+      userId: 'u1',
+      role: 'user',
+      content: '旧上下文'
+    });
+    db.addMemory({ scope: 'user', roomId: 'runtime-old', userId: 'u1', content: '旧记忆' });
+    db.createTask({ roomId: 'runtime-old', userId: 'u1', requestType: 'qa', prompt: '旧任务' });
+
+    db.seedConfig(
+      await makeTestConfig({
+        auth: {
+          systemAdmins: [],
+          rooms: [
+            {
+              stableId: 'stable-room',
+              id: 'runtime-new',
+              runtimeIds: ['runtime-old'],
+              topic: '测试群',
+              enabled: true,
+              admins: []
+            }
+          ]
+        }
+      })
+    );
+
+    expect(db.resolveRoom('runtime-old')).toMatchObject({ id: 'stable-room', authorized: true });
+    expect(db.resolveRoom('runtime-new')).toMatchObject({ id: 'stable-room', authorized: true });
+    expect(db.getContext({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 })).toEqual([
+      { role: 'user', content: '旧上下文' }
+    ]);
+    expect(
+      db.listMemories({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 }).map((m) => m.content)
+    ).toEqual(['旧记忆']);
+    expect(db.listRoomTasks('stable-room', 10).map((task) => task.prompt)).toEqual(['旧任务']);
+    expect(db.listRoomTasks('runtime-old', 10)).toEqual([]);
+    db.close();
+  });
+
+  it('binds a new runtime id by topic only when the authorized topic is unique', async () => {
+    const config = await makeTestConfig({
+      auth: {
+        systemAdmins: [],
+        allowTopicRoomBinding: true,
+        rooms: [
+          {
+            stableId: 'stable-room',
+            topic: '唯一群',
+            enabled: true,
+            admins: []
+          }
+        ]
+      }
+    });
+    const db = AppDatabase.memory();
+    db.seedConfig(config);
+
+    expect(db.resolveRoom('runtime-fresh', '唯一群', { allowTopicBinding: true })).toMatchObject({
+      id: 'stable-room',
+      authorized: true,
+      enabled: true
+    });
+    expect(db.resolveRoom('runtime-fresh')).toMatchObject({
+      id: 'stable-room',
+      authorized: true
+    });
+    db.close();
+  });
+
+  it('does not topic-bind a runtime id when multiple authorized rooms share a topic', async () => {
+    const config = await makeTestConfig({
+      auth: {
+        systemAdmins: [],
+        allowTopicRoomBinding: true,
+        rooms: [
+          { stableId: 'stable-a', topic: '重名群', enabled: true, admins: [] },
+          { stableId: 'stable-b', topic: '重名群', enabled: true, admins: [] }
+        ]
+      }
+    });
+    const db = AppDatabase.memory();
+    db.seedConfig(config);
+
+    expect(db.resolveRoom('runtime-fresh', '重名群', { allowTopicBinding: true })).toBeUndefined();
     db.close();
   });
 

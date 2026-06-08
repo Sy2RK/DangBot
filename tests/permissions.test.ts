@@ -17,6 +17,15 @@ describe('permissions', () => {
     expect(canUseCommand(command, 'group_admin', enabledRoom)).toBe(true);
   });
 
+  it('allows admin commands for members in explicit adminless mode', () => {
+    const command: ParsedCommand = {
+      type: 'create_automation',
+      rawText: '设置定时任务 每天 09:00 总结群聊',
+      automationText: '设置定时任务 每天 09:00 总结群聊'
+    };
+    expect(canUseCommand(command, 'member', { ...enabledRoom, admins: [] }, { adminless: true })).toBe(true);
+  });
+
   it('blocks global memory writes from normal members', () => {
     expect(canUseCommand({ type: 'remember_global', rawText: '全局记住', memoryText: 'x' }, 'member', enabledRoom)).toBe(
       false
@@ -26,9 +35,10 @@ describe('permissions', () => {
     );
   });
 
-  it('allows only status for normal members in disabled rooms', () => {
+  it('allows status and health for normal members in disabled rooms', () => {
     const disabled = { ...enabledRoom, enabled: false };
     expect(canUseCommand({ type: 'status', rawText: '状态' }, 'member', disabled)).toBe(true);
+    expect(canUseCommand({ type: 'health', rawText: '/health' }, 'member', disabled)).toBe(true);
     expect(canUseCommand({ type: 'normal_request', rawText: 'hi', prompt: 'hi' }, 'member', disabled)).toBe(false);
   });
 });

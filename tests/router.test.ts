@@ -25,6 +25,25 @@ describe('BotRequestRouter', () => {
     expect(responder.texts.at(-1)).toContain('醒啦');
   });
 
+  it('replies to /health with a cat-toned local self-check', async () => {
+    const { router, chatCalls } = await setup();
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '/health', text: '@DangBot /health' }),
+      responder
+    );
+
+    expect(responder.texts).toHaveLength(1);
+    expect(responder.texts[0]).toContain('小当自检完成，喵。');
+    expect(responder.texts[0]).toContain('微信入口：健康');
+    expect(responder.texts[0]).toContain('本群授权：健康');
+    expect(responder.texts[0]).toContain('数据库：健康');
+    expect(responder.texts[0]).toContain('LLM：健康');
+    expect(responder.texts[0]).toContain('自动化：健康');
+    expect(chatCalls).toHaveLength(0);
+  });
+
   it('runs a normal mentioned request after the room is enabled', async () => {
     const { router, db, chatCalls, chatOptions } = await setup({ enabled: true });
     const responder = new MemoryResponder();
@@ -600,46 +619,110 @@ describe('BotRequestRouter', () => {
       status: 'active',
       nextRunAt: '2026-06-05T01:40:00.000Z'
     });
-    expect(responder.texts.at(-1)).toContain(`自动化创建好啦：${automation?.id}`);
+    expect(responder.texts.at(-1)).toContain('记好啦，喵。');
+    expect(responder.texts.at(-1)).toContain('小提醒：喝水');
+    expect(responder.texts.at(-1)).toContain('下次我会在：2026-06-05 09:40');
+    expect(responder.texts.at(-1)).not.toContain(automation!.id);
+    expect(responder.texts.at(-1)).not.toContain('T01:40:00.000Z');
 
     await router.handleMessage(
       message({ senderId: 'admin', senderName: 'Admin', mentioned: true, mentionText: '自动化列表' }),
       responder
     );
-    expect(responder.texts.at(-1)).toContain(automation?.id);
+    expect(responder.texts.at(-1)).toContain('小当的小闹钟');
+    expect(responder.texts.at(-1)).toContain('小提醒');
+    expect(responder.texts.at(-1)).not.toContain(automation!.id);
 
     await router.handleMessage(
       message({
         senderId: 'admin',
         senderName: 'Admin',
         mentioned: true,
-        mentionText: `暂停 ${automation?.id}`
+        mentionText: '暂停第1个'
       }),
       responder
     );
     expect(db.getAutomation(automation!.id)?.status).toBe('paused');
+    expect(responder.texts.at(-1)).toContain('把这只小闹钟按住了');
+    expect(responder.texts.at(-1)).not.toContain(automation!.id);
 
     await router.handleMessage(
       message({
         senderId: 'admin',
         senderName: 'Admin',
         mentioned: true,
-        mentionText: `恢复 ${automation?.id}`
+        mentionText: '恢复第1个'
       }),
       responder
     );
     expect(db.getAutomation(automation!.id)?.status).toBe('active');
+    expect(responder.texts.at(-1)).toContain('把这只小闹钟叫醒了');
+    expect(responder.texts.at(-1)).toContain('下次我会在：');
+    expect(responder.texts.at(-1)).not.toContain(automation!.id);
+    expect(responder.texts.at(-1)).not.toContain('T');
 
     await router.handleMessage(
       message({
         senderId: 'admin',
         senderName: 'Admin',
         mentioned: true,
-        mentionText: `删除 ${automation?.id}`
+        mentionText: '删除第1个'
       }),
       responder
     );
     expect(db.getAutomation(automation!.id)).toBeUndefined();
+    expect(responder.texts.at(-1)).toContain('叼走啦');
+    expect(responder.texts.at(-1)).not.toContain(automation!.id);
+  });
+
+  it('allows members to create automations in adminless mode', async () => {
+    const { router, db } = await setup({ enabled: true, adminless: true });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({
+        mentioned: true,
+        mentionText: '设置定时任务 每天 09:00 总结群聊',
+        timestamp: new Date('2026-06-05T01:30:00.000Z')
+      }),
+      responder
+    );
+
+    const automation = db.listRoomAutomations('room1', 1)[0];
+    expect(automation).toMatchObject({
+      kind: 'scheduled_prompt',
+      scheduleType: 'daily',
+      prompt: '总结群聊',
+      status: 'active'
+    });
+    expect(responder.texts.at(-1)).toContain('记好啦，喵。');
+    expect(responder.texts.at(-1)).toContain('定时小爪：总结群聊');
+    expect(responder.texts.at(-1)).not.toContain(automation!.id);
+  });
+
+  it('creates automations when the command prefix is followed by a Chinese comma', async () => {
+    const { router, db } = await setup({ enabled: true, adminless: true });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({
+        mentioned: true,
+        mentionText: '设置定时任务，每天下午六点提醒我去锻炼',
+        timestamp: new Date('2026-06-05T16:30:00.000Z')
+      }),
+      responder
+    );
+
+    const automation = db.listRoomAutomations('room1', 1)[0];
+    expect(automation).toMatchObject({
+      kind: 'reminder',
+      scheduleType: 'daily',
+      prompt: '去锻炼',
+      nextRunAt: '2026-06-06T10:00:00.000Z'
+    });
+    expect(responder.texts.at(-1)).toContain('下次我会在：2026-06-06 18:00');
+    expect(responder.texts.at(-1)).not.toContain(automation!.id);
+    expect(responder.texts.at(-1)).not.toContain('T10:00:00.000Z');
   });
 
   it('runs reminder and scheduled prompt automations', async () => {
@@ -737,6 +820,7 @@ async function setup(
   const chatCalls: Array<Array<{ role: string; content: string }>> = [];
   const chatOptions: Array<{ temperature?: number } | undefined> = [];
   const intentCalls: Array<Array<{ role: string; content: string }>> = [];
+  const automationCalls: Array<Array<{ role: string; content: string }>> = [];
   const videoCalls: Array<{ frameImagePath?: string }> = [];
   const searchCalls: Array<{
     content: string;
@@ -757,6 +841,11 @@ async function setup(
               ? options.intent(messages.at(-1)?.content ?? '')
               : (options.intent ?? classifyIntentForRouterTest(messages.at(-1)?.content ?? ''))
         });
+      }
+
+      if (isAutomationDefinitionCall(messages)) {
+        automationCalls.push(messages);
+        return automationDefinitionForRouterTest(messages.at(-1)?.content ?? '');
       }
 
       chatCalls.push(messages);
@@ -795,7 +884,7 @@ async function setup(
     undefined,
     undefined
   );
-  return { router, db, chatCalls, chatOptions, intentCalls, videoCalls, searchCalls };
+  return { router, db, chatCalls, chatOptions, intentCalls, automationCalls, videoCalls, searchCalls };
 }
 
 function isIntentClassificationCall(messages: Array<{ role: string; content: string }>): boolean {
@@ -803,6 +892,44 @@ function isIntentClassificationCall(messages: Array<{ role: string; content: str
     (messages[0]?.content.includes('请求意图分类器') ?? false) &&
     (messages.at(-1)?.content.includes('请判断 requestType') ?? false)
   );
+}
+
+function isAutomationDefinitionCall(messages: Array<{ role: string; content: string }>): boolean {
+  return (
+    (messages[0]?.content.includes('自动化定时任务解析器') ?? false) &&
+    (messages.at(-1)?.content.includes('请解析这个自动化或提醒') ?? false)
+  );
+}
+
+function automationDefinitionForRouterTest(prompt: string): string {
+  if (prompt.includes('设置定时任务 每天 09:00 总结群聊')) {
+    return JSON.stringify({
+      valid: true,
+      kind: 'scheduled_prompt',
+      prompt: '总结群聊',
+      schedule: { type: 'daily', time: '09:00' }
+    });
+  }
+
+  if (prompt.includes('设置定时任务，每天下午六点提醒我去锻炼')) {
+    return JSON.stringify({
+      valid: true,
+      kind: 'reminder',
+      prompt: '去锻炼',
+      schedule: { type: 'daily', time: '18:00' }
+    });
+  }
+
+  if (prompt.includes('提醒我 10分钟后 喝水')) {
+    return JSON.stringify({
+      valid: true,
+      kind: 'reminder',
+      prompt: '喝水',
+      schedule: { type: 'once_relative', amount: 10, unit: 'minute' }
+    });
+  }
+
+  return '{"valid":false,"reason":"not an automation"}';
 }
 
 function classifyIntentForRouterTest(classificationPrompt: string): RequestKind {

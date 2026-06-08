@@ -43,7 +43,9 @@ export type RequestKind =
   | 'admin';
 
 export interface RoomConfig {
+  stableId?: string;
   id?: string;
+  runtimeIds?: string[];
   topic?: string;
   enabled: boolean;
   admins: string[];
@@ -174,6 +176,7 @@ export interface ParsedCommand {
     | 'enable_room'
     | 'disable_room'
     | 'status'
+    | 'health'
     | 'clear_user_context'
     | 'clear_room_context'
     | 'cancel_task'
@@ -194,6 +197,7 @@ export interface ParsedCommand {
   rawText: string;
   taskId?: string;
   automationId?: string;
+  automationIndex?: number;
   prompt?: string;
   memoryText?: string;
   automationText?: string;

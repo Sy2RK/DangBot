@@ -2,6 +2,7 @@ import type { ParsedCommand } from '../types.js';
 
 const taskIdPattern = /(task_[a-f0-9-]{8,36})/i;
 const automationIdPattern = /(auto_[a-f0-9-]{8,36})/i;
+const automationOrdinalPattern = /第\s*([0-9一二三四五六七八九十两]+)\s*(?:个|条|项|只)?/;
 
 export function parseCommand(text: string): ParsedCommand {
   const rawText = text.trim();
@@ -20,23 +21,28 @@ export function parseCommand(text: string): ParsedCommand {
     return { type: 'status', rawText };
   }
 
+  if (/^(\/health|health|自检|健康检查|健康状态)$/.test(lower)) {
+    return { type: 'health', rawText };
+  }
+
   if (/^(自动化列表|提醒列表|定时任务列表|查看自动化|查看提醒|automations|reminders)$/i.test(normalized)) {
     return { type: 'list_automations', rawText };
   }
 
   const automationId = normalized.match(automationIdPattern)?.[1];
-  if (automationId && /^(暂停|停用|pause)/i.test(normalized)) {
-    return { type: 'pause_automation', rawText, automationId };
+  const automationIndex = parseAutomationIndex(normalized);
+  if ((automationId || automationIndex) && /^(暂停|停用|pause)/i.test(normalized)) {
+    return { type: 'pause_automation', rawText, automationId, automationIndex };
   }
-  if (automationId && /^(恢复|启用|resume|start)/i.test(normalized)) {
-    return { type: 'resume_automation', rawText, automationId };
+  if ((automationId || automationIndex) && /^(恢复|启用|resume|start)/i.test(normalized)) {
+    return { type: 'resume_automation', rawText, automationId, automationIndex };
   }
-  if (automationId && /^(删除|移除|取消自动化|delete|remove)/i.test(normalized)) {
-    return { type: 'delete_automation', rawText, automationId };
+  if ((automationId || automationIndex) && /^(删除|移除|取消自动化|delete|remove)/i.test(normalized)) {
+    return { type: 'delete_automation', rawText, automationId, automationIndex };
   }
 
   const createAutomation = normalized.match(
-    /^(?:创建自动化|新增自动化|自动化|定时任务|定时|创建提醒|提醒我|提醒|schedule|remind me|remind)[:：]?\s*(.+)$/i
+    /^(?:(?:创建|新增|设置)(?:一个|个)?自动化|(?:创建|设置)(?:一个|个)?定时任务|自动化|定时任务|定时|(?:创建|设置)(?:一个|个)?提醒|提醒我|提醒|schedule|remind me|remind)[\s:：,，;；、]*(.+)$/i
   );
   if (createAutomation?.[1]?.trim()) {
     return { type: 'create_automation', rawText, automationText: normalized };
@@ -99,6 +105,42 @@ export function parseCommand(text: string): ParsedCommand {
   }
 
   return { type: 'normal_request', rawText, prompt: rawText };
+}
+
+function parseAutomationIndex(text: string): number | undefined {
+  const token = text.match(automationOrdinalPattern)?.[1];
+  if (!token) return undefined;
+  const numeric = Number(token);
+  if (Number.isInteger(numeric) && numeric > 0) return numeric;
+
+  const chinese = parseSmallChineseNumber(token);
+  return chinese && chinese > 0 ? chinese : undefined;
+}
+
+function parseSmallChineseNumber(token: string): number | undefined {
+  const digitMap: Record<string, number> = {
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9
+  };
+  if (token === '十') return 10;
+  if (token.length === 1) return digitMap[token];
+  const tenIndex = token.indexOf('十');
+  if (tenIndex === -1) return undefined;
+
+  const before = token.slice(0, tenIndex);
+  const after = token.slice(tenIndex + 1);
+  const tens = before ? digitMap[before] : 1;
+  const ones = after ? digitMap[after] : 0;
+  if (!tens || ones === undefined) return undefined;
+  return tens * 10 + ones;
 }
 
 export function stripBotMention(

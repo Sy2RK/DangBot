@@ -1,5 +1,9 @@
 import type { ParsedCommand, RoomState, UserRole } from '../types.js';
 
+interface PermissionOptions {
+  adminless?: boolean;
+}
+
 const adminCommands = new Set<ParsedCommand['type']>([
   'enable_room',
   'disable_room',
@@ -15,17 +19,22 @@ const adminCommands = new Set<ParsedCommand['type']>([
   'delete_automation'
 ]);
 
-export function canUseCommand(command: ParsedCommand, role: UserRole, room?: RoomState): boolean {
+export function canUseCommand(
+  command: ParsedCommand,
+  role: UserRole,
+  room?: RoomState,
+  options: PermissionOptions = {}
+): boolean {
   if (role === 'system_admin') return true;
 
   if (!room?.authorized) return false;
 
   if (adminCommands.has(command.type)) {
-    return role === 'group_admin';
+    return role === 'group_admin' || options.adminless === true;
   }
 
   if (!room.enabled) {
-    return command.type === 'status';
+    return command.type === 'status' || command.type === 'health';
   }
 
   return true;

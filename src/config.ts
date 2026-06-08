@@ -6,7 +6,9 @@ import type { AppConfig } from './types.js';
 import { resolveFromCwd } from './utils/fs.js';
 
 const roomConfigSchema = z.object({
+  stableId: z.string().optional(),
   id: z.string().optional(),
+  runtimeIds: z.array(z.string()).default([]),
   topic: z.string().optional(),
   enabled: z.boolean().default(false),
   admins: z.array(z.string()).default([])
