@@ -36,6 +36,7 @@ export const replyPhrases = {
   emptyTaskResult: '做完啦，不过没有生成可展示的结果。',
   roomNotEnabled: '这个群我还没醒，先让管理员启用一下。',
   operationUnavailable: '这个操作现在还不开放。',
+  voiceFileGenerating: '好，我把这段话合成语音文件发你。',
   progressReceived: '收到，我先扒拉一下。',
   progressFallbackPlan: '我打算先看清楚你要什么，再把材料和上下文捋一遍，最后给你一个能直接用的结果。',
   progressStage: (detail: string) => `这一步处理完啦：${detail}`,

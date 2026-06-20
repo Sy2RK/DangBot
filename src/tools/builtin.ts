@@ -125,9 +125,7 @@ async function executeVoiceGeneration(
   ctx: ToolExecutionContext,
   input: z.infer<typeof voiceInput>
 ) {
-  await ctx.stage('要朗读的文字看清啦，准备合成语音。');
   const voice = await ctx.llm.generateVoice(input.text, ctx.signal);
-  await ctx.stage('语音已经合成好啦，准备发送 MP3 文件。');
   return {
     kind: 'file' as const,
     filePath: voice.filePath,

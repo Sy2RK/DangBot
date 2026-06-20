@@ -1000,7 +1000,9 @@ export class BotRequestRouter {
       return;
     }
 
-    if (shouldUseStepOutput(requestType)) {
+    if (requestType === 'voice_generation') {
+      await this.replyPlain(responder, replyPhrases.voiceFileGenerating);
+    } else if (shouldUseStepOutput(requestType)) {
       await this.createProgressReporter(responder, true, task.id).received();
     }
 
@@ -1728,7 +1730,6 @@ function shouldUseStepOutput(requestType: RequestKind): boolean {
     'image_analysis',
     'video_analysis',
     'image_generation',
-    'voice_generation',
     'video_generation',
     'web_search',
     'summary',
@@ -1757,7 +1758,6 @@ function buildTemplateTaskPlan(task: TaskRecord, attachments: AttachmentRecord[]
     image_generation: hasAttachment
       ? '我打算先看你的参考图和描述，再交给画图模型，最后把生成图发出来。'
       : '我打算先看清你的描述，再交给画图模型，最后把生成图发出来。',
-    voice_generation: '我打算先提取要朗读的文字，再用豆包合成语音，最后把 MP3 文件发出来。',
     video_generation: hasAttachment
       ? '我打算先拿参考图当首帧，再按你的描述生成视频，最后把文件发出来。'
       : '我打算先看清你的描述，再提交视频生成，最后把文件发出来。',
