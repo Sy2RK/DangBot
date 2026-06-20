@@ -291,6 +291,23 @@ describe('BotRequestRouter', () => {
     });
   });
 
+  it('lets the AI-classified voice intent synthesize a literal sentence ending in 诗', async () => {
+    const { router, voiceCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      intent: 'voice_generation'
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '念一下这是一首诗' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toContain('/tmp/mock.mp3'));
+    expect(voiceCalls).toEqual(['这是一首诗']);
+  });
+
   it('resolves a named work before synthesizing only its full text', async () => {
     const fullText =
       '豫章故郡，洪都新府。星分翼轸，地接衡庐。襟三江而带五湖，控蛮荆而引瓯越。时维九月，序属三秋。潦水尽而寒潭清，烟光凝而暮山紫。';
@@ -422,6 +439,7 @@ describe('BotRequestRouter', () => {
       enabled: true,
       adminless: true,
       searchEnabled: true,
+      webSearchAnswer: preparedText,
       agent: (messages) => {
         const state = messages.at(-1)?.content ?? '';
         if (state.includes('任务尚未完成：最终必须调用目标工具 voice.generate')) {
@@ -464,6 +482,140 @@ describe('BotRequestRouter', () => {
     expect(voiceCalls).toEqual([preparedText]);
     expect(agentCalls).toHaveLength(4);
     expect(db.listRoomTasks('room1', 1)[0]?.status).toBe('completed');
+  });
+
+  it('does not expose terminal tools that are unrelated to the task target', async () => {
+    const { router, db, voiceCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      intent: 'image_generation',
+      agent: () =>
+        JSON.stringify({
+          action: 'tool',
+          toolName: 'voice.generate',
+          input: { text: '不应该被合成' }
+        })
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '生成一张猫咪图片' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(db.listRoomTasks('room1', 1)[0]?.status).toBe('failed'));
+    expect(voiceCalls).toEqual([]);
+    expect(db.listRoomTasks('room1', 1)[0]?.error).toContain('不可用工具：voice.generate');
+  });
+
+  it('does not allow model text to replace a tool-backed result', async () => {
+    const { router, searchCalls, agentCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      searchEnabled: true,
+      intent: 'web_search',
+      agent: (messages) => {
+        const state = messages.at(-1)?.content ?? '';
+        if (state.includes('工具型任务必须返回目标工具 web.search 的结果')) {
+          return '{"action":"finish","result":"last_tool"}';
+        }
+        if (state.includes('工具：web.search')) {
+          return '{"action":"finish","result":"text","text":"伪造覆盖结果"}';
+        }
+        return JSON.stringify({
+          action: 'tool',
+          toolName: 'web.search',
+          input: { prompt: '查询测试', query: '测试' }
+        });
+      }
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '联网搜索测试' }),
+      responder
+    );
+
+    await vi.waitFor(() =>
+      expect(responder.texts).toContain(
+        'mock search answer\n\n来源 1：Qwen news https://example.test/qwen'
+      )
+    );
+    expect(responder.texts).not.toContain('伪造覆盖结果');
+    expect(searchCalls).toHaveLength(1);
+    expect(agentCalls).toHaveLength(3);
+  });
+
+  it('binds search output through text preparation into the exact TTS input', async () => {
+    const fullText = '豫章故郡，洪都新府。请洒潘江，各倾陆海云尔。';
+    const searchMaterial = `${fullText}\n滕王高阁临江渚，佩玉鸣鸾罢歌舞。`;
+    const { router, db, voiceCalls, agentCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      searchEnabled: true,
+      webSearchAnswer: searchMaterial,
+      agent: (messages) => {
+        const state = messages.at(-1)?.content ?? '';
+        if (state.includes('voice.generate 的 text 必须逐字使用')) {
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'voice.generate',
+            input: { text: fullText }
+          });
+        }
+        if (state.includes('工具：text.prepare')) {
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'voice.generate',
+            input: { text: searchMaterial }
+          });
+        }
+        if (state.includes('text.prepare 的 source 必须完整使用')) {
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'text.prepare',
+            input: {
+              instruction: '只保留正文',
+              source: searchMaterial,
+              startMarker: '豫章故郡，洪都新府。',
+              endMarker: '请洒潘江，各倾陆海云尔。'
+            }
+          });
+        }
+        if (state.includes('工具：web.search')) {
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'text.prepare',
+            input: {
+              instruction: '只保留正文',
+              source: '伪造材料',
+              startMarker: '豫章故郡，洪都新府。',
+              endMarker: '请洒潘江，各倾陆海云尔。'
+            }
+          });
+        }
+        return JSON.stringify({
+          action: 'tool',
+          toolName: 'web.search',
+          input: { prompt: '只返回正文', query: '滕王阁序 原文' }
+        });
+      }
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '朗读一下滕王阁序' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toContain('/tmp/mock.mp3'));
+    expect(voiceCalls).toEqual([fullText]);
+    expect(agentCalls).toHaveLength(5);
+    expect(db.listTaskToolCalls(db.listRoomTasks('room1', 1)[0]!.id)).toMatchObject([
+      { toolName: 'web.search', status: 'completed' },
+      { toolName: 'text.prepare', status: 'completed' },
+      { toolName: 'voice.generate', status: 'completed' }
+    ]);
   });
 
   it('denies disabled tools before creating tasks', async () => {

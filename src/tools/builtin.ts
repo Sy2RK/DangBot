@@ -75,6 +75,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
       }),
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      canRunAsSupport: true,
       capabilities: { network: true },
       execute: executeWebSearch
     },
@@ -85,6 +86,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      canRunAsSupport: true,
       execute: executeFileAnalysis
     },
     {
@@ -94,6 +96,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      canRunAsSupport: true,
       execute: executeImageAnalysis
     },
     {
@@ -103,6 +106,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      canRunAsSupport: true,
       execute: executeVideoAnalysis
     },
     {
@@ -112,6 +116,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      terminalResult: true,
       execute: executeImageGeneration
     },
     {
@@ -135,6 +140,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
       inputSchema: textPrepareInput,
       riskLevel: 'low',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      canRunAsSupport: true,
       execute: executeTextPreparation
     },
     {
@@ -144,6 +150,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
       inputSchema: promptInput,
       riskLevel: 'high',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      terminalResult: true,
       execute: executeVideoGeneration
     }
   ];
@@ -401,10 +408,7 @@ export function extractSpeechText(prompt: string): string {
 
 export function isUnresolvedSpeechReference(text: string): boolean {
   const normalized = text.trim();
-  return (
-    /^(?:一下)?\s*《[^》]{1,80}》$/.test(normalized) ||
-    /^[\p{Script=Han}A-Za-z0-9·]{2,30}(?:序|赋|传|记|诗|词|歌|曲|文|书)$/u.test(normalized)
-  );
+  return /^(?:一下)?\s*《[^》]{1,80}》$/.test(normalized);
 }
 
 export function extractBoundedText(

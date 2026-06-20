@@ -46,6 +46,7 @@ export interface ToolDefinition<Input = unknown> {
   inputSchema: z.ZodType<Input>;
   riskLevel: ToolRiskLevel;
   allowedRoles: UserRole[];
+  canRunAsSupport?: boolean;
   terminalResult?: boolean;
   timeoutMs?: number;
   capabilities?: {

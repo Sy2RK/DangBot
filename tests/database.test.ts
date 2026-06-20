@@ -228,4 +228,27 @@ describe('AppDatabase', () => {
     expect(db.listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })).toEqual([]);
     db.close();
   });
+
+  it('scopes an approval to the tool that was actually approved', () => {
+    const db = AppDatabase.memory();
+    const task = db.createTask({
+      roomId: 'room1',
+      userId: 'u1',
+      requestType: 'video_generation',
+      prompt: '生成视频',
+      toolName: 'video.generate'
+    });
+    db.createApproval({
+      taskId: task.id,
+      roomId: 'room1',
+      requesterId: 'u1',
+      riskType: 'high_risk_tool:video.generate',
+      toolName: 'video.generate'
+    });
+    db.resolveApproval(task.id, 'admin', true);
+
+    expect(db.hasApprovedApproval(task.id, 'video.generate')).toBe(true);
+    expect(db.hasApprovedApproval(task.id, 'voice.generate')).toBe(false);
+    db.close();
+  });
 });

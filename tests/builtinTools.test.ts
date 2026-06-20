@@ -24,7 +24,9 @@ describe('builtin tool inputs', () => {
   it('recognizes a named work placeholder that is not actual speech content', () => {
     expect(isUnresolvedSpeechReference('《滕王阁序》')).toBe(true);
     expect(isUnresolvedSpeechReference('一下《滕王阁序》')).toBe(true);
-    expect(isUnresolvedSpeechReference('滕王阁序')).toBe(true);
+    expect(isUnresolvedSpeechReference('滕王阁序')).toBe(false);
+    expect(isUnresolvedSpeechReference('这是一首诗')).toBe(false);
+    expect(isUnresolvedSpeechReference('请读作文')).toBe(false);
     expect(isUnresolvedSpeechReference('落霞与孤鹜齐飞，秋水共长天一色。')).toBe(false);
   });
 

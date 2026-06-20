@@ -856,10 +856,19 @@ export class AppDatabase {
       .run(approved ? 'approved' : 'rejected', approverId, nowIso(), taskId);
   }
 
-  hasApprovedApproval(taskId: string): boolean {
+  hasApprovedApproval(taskId: string, toolName?: string): boolean {
     const row = this.db
-      .prepare("SELECT 1 AS approved FROM approvals WHERE task_id = ? AND status = 'approved' LIMIT 1")
-      .get(taskId) as { approved: number } | undefined;
+      .prepare(
+        `
+        SELECT 1 AS approved
+        FROM approvals
+        WHERE task_id = ?
+          AND status = 'approved'
+          AND (? IS NULL OR tool_name = ?)
+        LIMIT 1
+      `
+      )
+      .get(taskId, toolName ?? null, toolName ?? null) as { approved: number } | undefined;
     return Boolean(row?.approved);
   }
 

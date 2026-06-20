@@ -1330,7 +1330,7 @@ export class BotRequestRouter {
       });
 
       if (decision.action === 'finish') {
-        const completionError = validateAgentCompletion(task, observations);
+        const completionError = validateAgentCompletion(task, observations, decision.result);
         if (completionError) {
           observations.push({
             toolName: 'agent.validation',
@@ -1361,7 +1361,12 @@ export class BotRequestRouter {
       if (!definition || !tools.some((tool) => tool.name === definition.name)) {
         throw new Error(`多步执行器选择了不可用工具：${decision.toolName}`);
       }
-      const validationMessage = validateAgentToolSequence(task, definition, observations);
+      const validationMessage = validateAgentToolSequence(
+        task,
+        definition,
+        decision.input,
+        observations
+      );
       if (validationMessage) {
         observations.push({
           toolName: 'agent.validation',
@@ -1393,7 +1398,7 @@ export class BotRequestRouter {
       );
       observations.push({ toolName: definition.name, input: parsedInput, result });
       lastResult = result;
-      if (definition.terminalResult) {
+      if (definition.terminalResult && definition.name === task.toolName) {
         return result;
       }
     }
@@ -1405,12 +1410,14 @@ export class BotRequestRouter {
     return this.tools
       .list()
       .filter((definition) => {
+        if (definition.name !== task.toolName && !definition.canRunAsSupport) return false;
         if (definition.name === 'web.search' && !this.config.search.enabled) return false;
         if (definition.name === 'voice.generate' && !this.llm.speechConfigured()) return false;
         const policy = this.evaluateToolPolicy(task, definition);
         return (
           policy.action === 'allow' ||
-          (policy.action === 'require_approval' && this.db.hasApprovedApproval(task.id))
+          (policy.action === 'require_approval' &&
+            this.db.hasApprovedApproval(task.id, definition.name))
         );
       })
       .map((definition) => ({
@@ -1425,7 +1432,10 @@ export class BotRequestRouter {
     if (policy.action === 'deny') {
       throw new Error(`工具不可用：${definition.name}（${policy.reason}）`);
     }
-    if (policy.action === 'require_approval' && !this.db.hasApprovedApproval(task.id)) {
+    if (
+      policy.action === 'require_approval' &&
+      !this.db.hasApprovedApproval(task.id, definition.name)
+    ) {
       throw new Error(`工具需要管理员审批：${definition.name}`);
     }
   }
@@ -1787,8 +1797,23 @@ function toolResultToTaskResult(
 function validateAgentToolSequence(
   task: TaskRecord,
   definition: ToolDefinition,
+  input: unknown,
   observations: AgentObservation[]
 ): string | undefined {
+  if (definition.name === 'text.prepare' && promptReferencesNamedWork(task.prompt)) {
+    const lastSearchIndex = findLastObservationIndex(observations, 'web.search');
+    if (lastSearchIndex >= 0) {
+      const searchText = observationText(observations[lastSearchIndex]);
+      const source =
+        input && typeof input === 'object'
+          ? (input as Record<string, unknown>).source
+          : undefined;
+      if (typeof source !== 'string' || source.trim() !== searchText?.trim()) {
+        return 'text.prepare 的 source 必须完整使用最近一次 web.search 的结果，不能替换成其他材料。';
+      }
+    }
+  }
+
   if (definition.name !== 'voice.generate' || !promptReferencesNamedWork(task.prompt)) {
     return undefined;
   }
@@ -1797,14 +1822,23 @@ function validateAgentToolSequence(
   if (lastSearchIndex < 0) return undefined;
   const lastPreparationIndex = findLastObservationIndex(observations, 'text.prepare');
   if (lastPreparationIndex > lastSearchIndex) {
-    const preparationInput = observations[lastPreparationIndex]?.input;
+    const preparation = observations[lastPreparationIndex];
+    const preparationInput = preparation?.input;
     if (
       preparationInput &&
       typeof preparationInput === 'object' &&
       typeof (preparationInput as Record<string, unknown>).startMarker === 'string' &&
       typeof (preparationInput as Record<string, unknown>).endMarker === 'string'
     ) {
-      return undefined;
+      const preparedText = observationText(preparation);
+      const voiceText =
+        input && typeof input === 'object'
+          ? (input as Record<string, unknown>).text
+          : undefined;
+      if (typeof voiceText === 'string' && voiceText.trim() === preparedText?.trim()) {
+        return undefined;
+      }
+      return 'voice.generate 的 text 必须逐字使用最近一次 text.prepare 的输出，不能重新使用搜索原文或另行改写。';
     }
   }
   return '不能把命名作品的搜索结果直接送入语音合成。请先调用 text.prepare，并同时提供 startMarker 与 endMarker，只截取指定作品的完整正文，去掉标题、注释、译文、来源和相邻作品。';
@@ -1812,14 +1846,22 @@ function validateAgentToolSequence(
 
 function validateAgentCompletion(
   task: TaskRecord,
-  observations: AgentObservation[]
+  observations: AgentObservation[],
+  result: 'last_tool' | 'text'
 ): string | undefined {
   if (!task.toolName) return undefined;
+  if (result !== 'last_tool') {
+    return `工具型任务必须返回目标工具 ${task.toolName} 的结果，不能用模型文本覆盖文件、图片或工具输出。`;
+  }
   const lastRealObservation = [...observations]
     .reverse()
     .find((observation) => observation.toolName !== 'agent.validation');
   if (lastRealObservation?.toolName === task.toolName) return undefined;
   return `任务尚未完成：最终必须调用目标工具 ${task.toolName}，不能停在中间处理步骤。`;
+}
+
+function observationText(observation?: AgentObservation): string | undefined {
+  return observation?.result.summary ?? observation?.result.text;
 }
 
 function promptReferencesNamedWork(prompt: string): boolean {
