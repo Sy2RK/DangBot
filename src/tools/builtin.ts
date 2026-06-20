@@ -17,6 +17,13 @@ const voiceInput = z.object({
   text: z.string().min(1).max(4096)
 });
 
+const textPrepareInput = z.object({
+  instruction: z.string().min(1).max(1000),
+  source: z.string().min(1).max(20_000),
+  startMarker: z.string().min(1).max(200).optional(),
+  endMarker: z.string().min(1).max(200).optional()
+});
+
 export function createBuiltinToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   for (const definition of builtinToolDefinitions()) {
@@ -61,6 +68,8 @@ function builtinToolDefinitions(): ToolDefinition[] {
     {
       name: 'web.search',
       description: '联网搜索并基于来源回答。',
+      inputDescription:
+        '{"prompt":"希望搜索结果完成的任务","query":"精确搜索词"}；获取文章正文时，prompt 要求只返回完整正文。',
       inputSchema: promptInput.extend({
         query: z.string().min(1)
       }),
@@ -72,6 +81,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
     {
       name: 'file.analyze',
       description: '读取并分析最近或当前文件。',
+      inputDescription: '{"prompt":"对文件的具体处理要求"}',
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
@@ -80,6 +90,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
     {
       name: 'image.analyze',
       description: '分析最近或当前图片。',
+      inputDescription: '{"prompt":"对图片的具体分析要求"}',
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
@@ -88,6 +99,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
     {
       name: 'video.analyze',
       description: '分析最近或当前视频。',
+      inputDescription: '{"prompt":"对视频的具体分析要求"}',
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
@@ -96,6 +108,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
     {
       name: 'image.generate',
       description: '生成图片或基于参考图改图。',
+      inputDescription: '{"prompt":"完整的图片生成要求"}',
       inputSchema: promptInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
@@ -103,16 +116,31 @@ function builtinToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'voice.generate',
-      description: '把指定文字合成为 MP3 语音文件并发送。',
+      description:
+        '把已经准备好的最终正文合成为 MP3 语音文件。text 必须是实际朗读正文，不能是作品名、任务说明或搜索结果来源。',
+      inputDescription: '{"text":"最终要朗读的完整正文，不能包含命令、作品名占位、来源或解释"}',
       inputSchema: voiceInput,
       riskLevel: 'medium',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
+      terminalResult: true,
       capabilities: { network: true },
       execute: executeVoiceGeneration
     },
     {
+      name: 'text.prepare',
+      description:
+        '从已有材料中提取、清理或改写出供下一个工具使用的最终文本，例如从搜索结果中只保留指定作品正文并去掉标题、注释、译文、来源和相邻作品。',
+      inputDescription:
+        '{"instruction":"要保留什么、去掉什么","source":"上一步得到的原始材料","startMarker":"正文开头原句","endMarker":"正文结尾原句"}；命名作品必须提供起止标记。',
+      inputSchema: textPrepareInput,
+      riskLevel: 'low',
+      allowedRoles: ['member', 'group_admin', 'system_admin'],
+      execute: executeTextPreparation
+    },
+    {
       name: 'video.generate',
       description: '生成视频或基于图片首帧生成视频。',
+      inputDescription: '{"prompt":"完整的视频生成要求"}',
       inputSchema: promptInput,
       riskLevel: 'high',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
@@ -121,10 +149,52 @@ function builtinToolDefinitions(): ToolDefinition[] {
   ];
 }
 
+async function executeTextPreparation(
+  ctx: ToolExecutionContext,
+  input: z.infer<typeof textPrepareInput>
+) {
+  if (input.startMarker || input.endMarker) {
+    if (!input.startMarker || !input.endMarker) {
+      throw new Error('确定性文本提取必须同时提供 startMarker 和 endMarker。');
+    }
+    const text = extractBoundedText(input.source, input.startMarker, input.endMarker);
+    return { kind: 'text' as const, text, summary: text };
+  }
+
+  const text = (
+    await ctx.llm.chat(
+      [
+        {
+          role: 'system',
+          content: [
+            ctx.system.content,
+            '你是内部文本提取器。严格按用户给出的边界从材料中提取最终文本。',
+            '只输出最终文本本身，不要标题、引言、解释、注释、译文、来源、链接、相邻作品或 Markdown。',
+            '不能凭空续写材料里不存在的内容；材料不足时明确返回“材料不足”。'
+          ].join('\n\n')
+        },
+        {
+          role: 'user',
+          content: [`处理要求：${input.instruction}`, `原始材料：\n${input.source}`].join('\n\n')
+        }
+      ],
+      ctx.signal,
+      { temperature: 0 }
+    )
+  ).trim();
+  if (!text || text === '材料不足') {
+    throw new Error('现有材料不足以准备后续工具所需的完整文本。');
+  }
+  return { kind: 'text' as const, text, summary: text };
+}
+
 async function executeVoiceGeneration(
   ctx: ToolExecutionContext,
   input: z.infer<typeof voiceInput>
 ) {
+  if (isUnresolvedSpeechReference(input.text)) {
+    throw new Error('语音工具收到的是作品名而不是正文，必须先取得完整正文再合成。');
+  }
   const voice = await ctx.llm.generateVoice(input.text, ctx.signal);
   return {
     kind: 'file' as const,
@@ -321,12 +391,74 @@ export function extractSpeechText(prompt: string): string {
       ''
     )
     .replace(
-      /^(?:请|麻烦|帮我)?\s*(?:朗读|读一下|读出来|念一下|念出来|播报)\s*[:：]?\s*/i,
+      /^(?:请|麻烦|帮我)?\s*(?:朗读(?:一下)?|读(?:一下|出来)?|念(?:一下|出来)?|播报)\s*[:：]?\s*/i,
       ''
     )
     .trim();
 
   return withoutCommand || normalized;
+}
+
+export function isUnresolvedSpeechReference(text: string): boolean {
+  const normalized = text.trim();
+  return (
+    /^(?:一下)?\s*《[^》]{1,80}》$/.test(normalized) ||
+    /^[\p{Script=Han}A-Za-z0-9·]{2,30}(?:序|赋|传|记|诗|词|歌|曲|文|书)$/u.test(normalized)
+  );
+}
+
+export function extractBoundedText(
+  source: string,
+  startMarker: string,
+  endMarker: string
+): string {
+  const start = locateFlexibleMarker(source, startMarker, 0);
+  if (!start) {
+    throw new Error(`原始材料中没有找到正文开头：${startMarker}`);
+  }
+  const end = locateFlexibleMarker(source, endMarker, start.end);
+  if (!end) {
+    throw new Error(`原始材料中没有找到正文结尾：${endMarker}`);
+  }
+  let endOffset = end.end;
+  while (endOffset < source.length && /[，。！？!?；;：:]/.test(source[endOffset] ?? '')) {
+    endOffset += 1;
+  }
+  return source.slice(start.start, endOffset).trim();
+}
+
+function locateFlexibleMarker(
+  source: string,
+  marker: string,
+  fromIndex: number
+): { start: number; end: number } | undefined {
+  const exactStart = source.indexOf(marker, fromIndex);
+  if (exactStart >= 0) {
+    return { start: exactStart, end: exactStart + marker.length };
+  }
+
+  const compactMarker = compactBoundaryText(marker).toLowerCase();
+  if (!compactMarker) return undefined;
+  const compactChars: string[] = [];
+  const originalIndexes: number[] = [];
+  for (let index = fromIndex; index < source.length; index += 1) {
+    const char = source[index] ?? '';
+    if (compactBoundaryText(char)) {
+      compactChars.push(char.toLowerCase());
+      originalIndexes.push(index);
+    }
+  }
+  const compactSource = compactChars.join('');
+  const compactStart = compactSource.indexOf(compactMarker);
+  if (compactStart < 0) return undefined;
+  const originalStart = originalIndexes[compactStart];
+  const originalEnd = originalIndexes[compactStart + compactMarker.length - 1];
+  if (originalStart === undefined || originalEnd === undefined) return undefined;
+  return { start: originalStart, end: originalEnd + 1 };
+}
+
+function compactBoundaryText(text: string): string {
+  return text.replace(/[\s，。！？、；：“”‘’（）《》,.!?;:'"()[\]{}\-—]/gu, '');
 }
 
 function needsTemporalSearchAnchor(query: string): boolean {

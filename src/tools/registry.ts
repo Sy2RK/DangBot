@@ -42,9 +42,11 @@ export interface ToolExecutionContext {
 export interface ToolDefinition<Input = unknown> {
   name: string;
   description: string;
+  inputDescription: string;
   inputSchema: z.ZodType<Input>;
   riskLevel: ToolRiskLevel;
   allowedRoles: UserRole[];
+  terminalResult?: boolean;
   timeoutMs?: number;
   capabilities?: {
     network?: boolean;

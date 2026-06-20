@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src tests",
+    "verify:voice-agent": "tsx scripts/verify-multistep-voice.ts",
+    "lint": "eslint src tests scripts",
     "format": "prettier --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -46,7 +47,8 @@
   },
   "pnpm": {
     "overrides": {
-      "form-data@2": "2.5.5",
+      "form-data@2": "2.5.6",
+      "form-data@4": "4.0.6",
       "fast-xml-parser": "5.8.0",
       "file-type": "link:vendor/file-type",
       "nth-check": "2.1.1",
@@ -54,7 +56,8 @@
       "phin": "3.7.1",
       "qs": "6.15.2",
       "tough-cookie": "4.1.4",
-      "tmp": "0.2.6",
+      "protobufjs": "7.6.3",
+      "tmp": "0.2.7",
       "uuid": "11.1.1",
       "xml2js": "0.6.2"
     },

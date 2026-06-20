@@ -121,6 +121,8 @@ export interface AppConfig {
     voiceTasksPerMinute: number;
     videoTasksPerMinute: number;
     searchTasksPerMinute: number;
+    maxAgentSteps: number;
+    agentTaskTimeoutMs: number;
     maxConcurrentTasks: number;
     maxConcurrentLongTasks: number;
     taskTimeoutMs: number;

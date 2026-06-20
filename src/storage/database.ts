@@ -856,6 +856,13 @@ export class AppDatabase {
       .run(approved ? 'approved' : 'rejected', approverId, nowIso(), taskId);
   }
 
+  hasApprovedApproval(taskId: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS approved FROM approvals WHERE task_id = ? AND status = 'approved' LIMIT 1")
+      .get(taskId) as { approved: number } | undefined;
+    return Boolean(row?.approved);
+  }
+
   createAutomation(input: {
     roomId: string;
     creatorId: string;

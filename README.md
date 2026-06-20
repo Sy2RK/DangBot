@@ -30,7 +30,7 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - `自动化列表`: list this room's automations.
 - `暂停第1个` / `恢复第1个` / `删除第1个`: manage an automation by its position in `自动化列表`.
 - `生成图片 ...` / `画一张 ...` / `出图 ...`: generate an image. The default OpenRouter model is `bytedance-seed/seedream-4.5`.
-- `生成语音：今天也要开心呀` / `朗读：...`: synthesize the requested text with Doubao TTS 2.0 and send the result as an MP3 file.
+- `生成语音：今天也要开心呀` / `朗读：...`: synthesize the requested text with Doubao TTS 2.0 and send the result as an MP3 file. Named works can trigger multiple steps: retrieve the text, extract its exact body, then synthesize only that body.
 - `生成视频 ...` / `做个视频 ...` / `出视频 ...`: generate a short video. The default OpenRouter model is `bytedance/seedance-2.0`. Prompts such as `5s`, `10 秒`, or `五秒` are parsed and passed as the requested duration.
 - Send an image and ask `把这张图动起来`: generate an image-to-video result from that image.
 - `联网搜索 ...` / `帮我查一下 ...`: search the web, then answer with source URLs. Time-sensitive external topics such as weather, news, prices, schedules, and model releases can also trigger search when the wording implies current information. Casual phrases like `今天午饭吃什么` stay as normal chat.
@@ -57,6 +57,8 @@ Manual memories are stored separately from automatic summaries, so explicit `记
 ## Tools, Policy, And Automations
 
 - Built-in tool calls such as web search, file analysis, image/video analysis, and image/video generation are registered in a tool registry and recorded in SQLite.
+- Tool-backed requests run through a bounded main-model loop. Each step can call one registered tool, observe its validated result, and choose the next tool. Duplicate calls, unavailable tools, policy violations, and the configured step/timeout limits stop the loop.
+- `text.prepare` supports deterministic start/end markers so later tools receive only the intended text instead of titles, instructions, citations, or adjacent content.
 - Speech synthesis is registered as `voice.generate`; the generated MP3 uses the normal `file` result kind.
 - `tools.policy.denyTools` can disable specific tools globally, for example `web.search`; `roomToolOverrides` can scope allow/deny rules to a room.
 - High-risk tools, including video generation, require approval when an approver is configured. Adminless mode keeps the earlier no-approval behavior.
@@ -69,7 +71,10 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm build
+pnpm verify:voice-agent
 ```
+
+`pnpm verify:voice-agent` is an opt-in live integration check. It uses the configured main model, web search, and Doubao TTS without sending anything to WeChat.
 
 ## Important notes
 

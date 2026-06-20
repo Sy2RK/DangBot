@@ -77,6 +77,8 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       voiceTasksPerMinute: 4,
       videoTasksPerMinute: 2,
       searchTasksPerMinute: 6,
+      maxAgentSteps: 8,
+      agentTaskTimeoutMs: 5000,
       maxConcurrentTasks: 2,
       maxConcurrentLongTasks: 1,
       taskTimeoutMs: 5000,

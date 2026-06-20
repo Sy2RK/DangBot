@@ -53,6 +53,8 @@ limits:
   voiceTasksPerMinute: 4
   videoTasksPerMinute: 2
   searchTasksPerMinute: 6
+  maxAgentSteps: 8
+  agentTaskTimeoutMs: 300000
   maxConcurrentTasks: 2
   maxConcurrentLongTasks: 1
   taskTimeoutMs: 120000

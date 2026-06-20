@@ -291,6 +291,181 @@ describe('BotRequestRouter', () => {
     });
   });
 
+  it('resolves a named work before synthesizing only its full text', async () => {
+    const fullText =
+      '豫章故郡，洪都新府。星分翼轸，地接衡庐。襟三江而带五湖，控蛮荆而引瓯越。时维九月，序属三秋。潦水尽而寒潭清，烟光凝而暮山紫。';
+    const searchMaterial = `${fullText}\n\n滕王阁诗\n滕王高阁临江渚，佩玉鸣鸾罢歌舞。`;
+    const { router, db, voiceCalls, searchCalls, agentCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      searchEnabled: true,
+      webSearchAnswer: searchMaterial,
+      agent: (messages) => {
+        const state = messages.at(-1)?.content ?? '';
+        if (state.includes('工具：voice.generate')) {
+          return '{"action":"finish","result":"last_tool"}';
+        }
+        if (state.includes('工具：text.prepare')) {
+          expect(state).toContain(`"content":"${fullText}"`);
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'voice.generate',
+            input: { text: fullText },
+            reason: '净化后的文本只有指定作品正文'
+          });
+        }
+        if (state.includes('工具：web.search')) {
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'text.prepare',
+            input: {
+              instruction:
+                '只保留《滕王阁序》正文，去掉标题、注释、译文、来源以及后面的《滕王阁诗》',
+              source: searchMaterial,
+              startMarker: '豫章故郡，洪都新府。',
+              endMarker: '潦水尽而寒潭清，烟光凝而暮山紫。'
+            },
+            reason: '搜索材料混有相邻作品，需要先提取正文'
+          });
+        }
+        return JSON.stringify({
+          action: 'tool',
+          toolName: 'web.search',
+          input: {
+            prompt: '查找《滕王阁序》完整原文，只返回正文，不要标题、注释、译文或来源',
+            query: '滕王阁序 完整原文'
+          },
+          reason: '用户只给了作品名，需要先取得正文'
+        });
+      }
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '朗读一下滕王阁序' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toContain('/tmp/mock.mp3'));
+    expect(searchCalls).toHaveLength(1);
+    expect(voiceCalls).toEqual([fullText]);
+    expect(voiceCalls[0]).not.toContain('朗读');
+    expect(voiceCalls[0]).not.toContain('一下');
+    expect(voiceCalls[0]).not.toContain('《滕王阁序》');
+    expect(voiceCalls[0]).not.toContain('滕王阁诗');
+    expect(agentCalls).toHaveLength(3);
+    expect(db.listRoomTasks('room1', 1)[0]).toMatchObject({
+      requestType: 'voice_generation',
+      resultKind: 'file',
+      status: 'completed'
+    });
+    expect(db.listTaskToolCalls(db.listRoomTasks('room1', 1)[0]!.id)).toMatchObject([
+      { toolName: 'web.search', status: 'completed' },
+      { toolName: 'text.prepare', status: 'completed' },
+      { toolName: 'voice.generate', status: 'completed' }
+    ]);
+  });
+
+  it('refuses to send a named-work placeholder directly to TTS', async () => {
+    const { router, db, voiceCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      agent: () =>
+        JSON.stringify({
+          action: 'tool',
+          toolName: 'voice.generate',
+          input: { text: '《滕王阁序》' }
+        })
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '朗读一下《滕王阁序》' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(db.listRoomTasks('room1', 1)[0]?.status).toBe('failed'));
+    expect(voiceCalls).toEqual([]);
+    expect(db.listRoomTasks('room1', 1)[0]?.error).toContain('作品名而不是正文');
+  });
+
+  it('stops an agent that repeats the same tool call', async () => {
+    const repeatedSearch = JSON.stringify({
+      action: 'tool',
+      toolName: 'web.search',
+      input: {
+        prompt: '查找《滕王阁序》完整原文，只返回正文',
+        query: '滕王阁序 完整原文'
+      }
+    });
+    const { router, db, searchCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      searchEnabled: true,
+      agent: () => repeatedSearch
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '朗读一下《滕王阁序》' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(db.listRoomTasks('room1', 1)[0]?.status).toBe('failed'));
+    expect(searchCalls).toHaveLength(1);
+    expect(db.listRoomTasks('room1', 1)[0]?.error).toContain('重复调用了相同工具');
+  });
+
+  it('does not finish a voice task before the target TTS tool runs', async () => {
+    const preparedText = '豫章故郡，洪都新府。请洒潘江，各倾陆海云尔。';
+    const { router, db, voiceCalls, agentCalls } = await setup({
+      enabled: true,
+      adminless: true,
+      searchEnabled: true,
+      agent: (messages) => {
+        const state = messages.at(-1)?.content ?? '';
+        if (state.includes('任务尚未完成：最终必须调用目标工具 voice.generate')) {
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'voice.generate',
+            input: { text: preparedText }
+          });
+        }
+        if (state.includes('工具：text.prepare')) {
+          return '{"action":"finish","result":"last_tool"}';
+        }
+        if (state.includes('工具：web.search')) {
+          return JSON.stringify({
+            action: 'tool',
+            toolName: 'text.prepare',
+            input: {
+              instruction: '只提取正文',
+              source: preparedText,
+              startMarker: '豫章故郡，洪都新府。',
+              endMarker: '请洒潘江，各倾陆海云尔。'
+            }
+          });
+        }
+        return JSON.stringify({
+          action: 'tool',
+          toolName: 'web.search',
+          input: { prompt: '只返回正文', query: '滕王阁序 原文' }
+        });
+      }
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '朗读一下滕王阁序' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toContain('/tmp/mock.mp3'));
+    expect(voiceCalls).toEqual([preparedText]);
+    expect(agentCalls).toHaveLength(4);
+    expect(db.listRoomTasks('room1', 1)[0]?.status).toBe('completed');
+  });
+
   it('denies disabled tools before creating tasks', async () => {
     const { router, db } = await setup({
       enabled: true,
@@ -856,8 +1031,10 @@ async function setup(
       signal?: AbortSignal,
       options?: { temperature?: number }
     ) => Promise<string>;
+    agent?: (messages: Array<{ role: string; content: string }>) => Promise<string> | string;
     intent?: RequestKind | ((classificationPrompt: string) => RequestKind);
     generateVoice?: (text: string) => Promise<{ filePath: string }>;
+    webSearchAnswer?: string;
     searchEnabled?: boolean;
     maxReplyTextChars?: number;
     denyTools?: string[];
@@ -893,6 +1070,7 @@ async function setup(
   const chatCalls: Array<Array<{ role: string; content: string }>> = [];
   const chatOptions: Array<{ temperature?: number } | undefined> = [];
   const intentCalls: Array<Array<{ role: string; content: string }>> = [];
+  const agentCalls: Array<Array<{ role: string; content: string }>> = [];
   const automationCalls: Array<Array<{ role: string; content: string }>> = [];
   const videoCalls: Array<{ frameImagePath?: string }> = [];
   const voiceCalls: string[] = [];
@@ -923,6 +1101,12 @@ async function setup(
         return automationDefinitionForRouterTest(messages.at(-1)?.content ?? '');
       }
 
+      if (isTaskAgentCall(messages)) {
+        agentCalls.push(messages);
+        if (options.agent) return options.agent(messages);
+        return defaultAgentDecision(messages);
+      }
+
       chatCalls.push(messages);
       chatOptions.push(chatOption);
       if (options.chat) return options.chat(messages, signal, chatOption);
@@ -942,13 +1126,13 @@ async function setup(
     },
     chatWithWebSearch: async (
       messages: Array<{ role: string; content: string }>,
-      options: { maxResults: number; searchContextSize: 'low' | 'medium' | 'high' }
+      webOptions: { maxResults: number; searchContextSize: 'low' | 'medium' | 'high' }
     ) => {
-      searchCalls.push({ content: messages.at(-1)?.content ?? '', options });
-      if (!(options.searchContextSize && options.maxResults))
+      searchCalls.push({ content: messages.at(-1)?.content ?? '', options: webOptions });
+      if (!(webOptions.searchContextSize && webOptions.maxResults))
         throw new Error('missing search options');
       return {
-        text: 'mock search answer',
+        text: options.webSearchAnswer ?? 'mock search answer',
         sources: [{ title: 'Qwen news', url: 'https://example.test/qwen' }]
       };
     }
@@ -970,6 +1154,7 @@ async function setup(
     chatCalls,
     chatOptions,
     intentCalls,
+    agentCalls,
     automationCalls,
     videoCalls,
     voiceCalls,
@@ -989,6 +1174,28 @@ function isAutomationDefinitionCall(messages: Array<{ role: string; content: str
     (messages[0]?.content.includes('自动化定时任务解析器') ?? false) &&
     (messages.at(-1)?.content.includes('请解析这个自动化或提醒') ?? false)
   );
+}
+
+function isTaskAgentCall(messages: Array<{ role: string; content: string }>): boolean {
+  return messages[0]?.content.includes('多步工具执行器') ?? false;
+}
+
+function defaultAgentDecision(messages: Array<{ role: string; content: string }>): string {
+  const content = messages.at(-1)?.content ?? '';
+  if (!content.includes('已执行观察：\n暂无')) {
+    return '{"action":"finish","result":"last_tool"}';
+  }
+
+  const toolName = content.match(/原单步路由建议：([^\n]+)/)?.[1]?.trim();
+  const inputJson = content.match(/原单步输入：([^\n]+)/)?.[1]?.trim();
+  if (!toolName || toolName === '无' || !inputJson || inputJson === '无') {
+    return '{"action":"finish","result":"text","text":"mock answer"}';
+  }
+  return JSON.stringify({
+    action: 'tool',
+    toolName,
+    input: JSON.parse(inputJson) as unknown
+  });
 }
 
 function automationDefinitionForRouterTest(prompt: string): string {

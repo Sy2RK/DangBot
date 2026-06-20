@@ -142,6 +142,8 @@ const configSchema = z.object({
     voiceTasksPerMinute: z.number().int().positive().default(4),
     videoTasksPerMinute: z.number().int().positive().default(2),
     searchTasksPerMinute: z.number().int().positive().default(6),
+    maxAgentSteps: z.number().int().min(2).max(12).default(8),
+    agentTaskTimeoutMs: z.number().int().positive().default(300_000),
     maxConcurrentTasks: z.number().int().positive().default(2),
     maxConcurrentLongTasks: z.number().int().positive().default(1),
     taskTimeoutMs: z.number().int().positive().default(120_000),

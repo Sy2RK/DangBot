@@ -44,6 +44,8 @@ limits:
   voiceTasksPerMinute: 4
   videoTasksPerMinute: 2
   searchTasksPerMinute: 6
+  maxAgentSteps: 8
+  agentTaskTimeoutMs: 300000
   videoGenerationTimeoutMs: 600000
   videoGenerationPollIntervalMs: 10000
   maxVideoBytes: 52428800

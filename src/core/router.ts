@@ -3,6 +3,12 @@ import { access } from 'node:fs/promises';
 import type { Logger } from 'pino';
 import { classifyRequestKind } from './intentClassifier.js';
 import { parseCommand } from './parser.js';
+import {
+  buildAgentMessages,
+  parseAgentDecision,
+  type AgentObservation,
+  type AgentToolDescriptor
+} from './taskAgent.js';
 import { refusalMessage, shouldRefusePrompt } from './security.js';
 import { canUseCommand } from '../domain/permissions.js';
 import { SlidingWindowRateLimiter } from '../domain/rateLimiter.js';
@@ -17,10 +23,7 @@ import type { MemoryConsolidationService } from '../domain/memoryConsolidation.j
 import type { TaskQueue } from '../domain/taskQueue.js';
 import type { FileService } from '../services/files/fileService.js';
 import type { ChatTurn, OpenAICompatibleClient } from '../services/llm/openaiCompatibleClient.js';
-import {
-  formatWebSearchResultsForLlm,
-  type WebSearchClient
-} from '../services/search/braveSearchClient.js';
+import type { WebSearchClient } from '../services/search/braveSearchClient.js';
 import type { AppDatabase } from '../storage/database.js';
 import {
   buildToolInputForRequest,
@@ -32,11 +35,12 @@ import {
   parseToolInput,
   previewToolResult,
   stringifyToolInput,
-  type ToolRegistry
+  type ToolDefinition,
+  type ToolRegistry,
+  type ToolResult
 } from '../tools/registry.js';
-import { currentBeijingDateContext, currentBeijingDateLabel } from '../utils/time.js';
+import { currentBeijingDateContext } from '../utils/time.js';
 import {
-  appendPlainSources,
   formatPlainList,
   normalizeOutgoingText,
   replyPhrases
@@ -1083,7 +1087,9 @@ export class BotRequestRouter {
       longRunning,
       task.requestType === 'video_generation'
         ? this.config.limits.videoGenerationTimeoutMs
-        : undefined
+        : task.toolName
+          ? this.config.limits.agentTaskTimeoutMs
+          : undefined
     );
   }
 
@@ -1179,193 +1185,10 @@ export class BotRequestRouter {
     };
 
     if (task.toolName) {
-      return this.executeRegisteredTool(task, attachments, signal, progress, system);
-    }
-
-    if (task.requestType === 'image_generation') {
-      const needsReferenceImage = promptReferencesImageForGeneration(task.prompt);
-      const referenceImage = needsReferenceImage
-        ? this.pickAttachment(task, attachments, 'image')
-        : undefined;
-      if (needsReferenceImage && !referenceImage) {
-        throw new Error('没有找到可用于生成图片的参考图。请先发送图片，或在同一条消息里带上图片。');
-      }
-      await progress.stage(
-        referenceImage ? '参考图我拿到啦，准备送去画。' : '描述我看明白啦，准备送去画。'
-      );
-      const imagePath = await this.llm.generateImage(
-        task.prompt,
-        {
-          referenceImagePath: referenceImage?.filePath,
-          referenceImageMimeType: referenceImage?.mimeType
-        },
-        signal
-      );
-      await progress.stage('图已经生成好啦，准备发出来。');
-      this.db.updateTask(task.id, {
-        status: 'completed',
-        resultKind: 'image',
-        resultPath: imagePath
-      });
-      return { imagePath };
-    }
-
-    if (task.requestType === 'video_generation') {
-      const referenceImage = this.pickAttachment(task, attachments, 'image');
-      if (promptNeedsReferenceImage(task.prompt) && !referenceImage) {
-        throw new Error('没有找到可用于生成视频的参考图。请先发送图片，或在同一条消息里带上图片。');
-      }
-      await progress.stage(
-        referenceImage ? '首帧参考图找到了，准备送去做视频。' : '视频描述我看明白啦，准备提交生成。'
-      );
-      const videoPath = await this.llm.generateVideo(
-        task.prompt,
-        {
-          frameImagePath: referenceImage?.filePath,
-          frameImageMimeType: referenceImage?.mimeType,
-          timeoutMs: this.config.limits.videoGenerationTimeoutMs,
-          pollIntervalMs: this.config.limits.videoGenerationPollIntervalMs
-        },
-        signal
-      );
-      await progress.stage('视频已经生成好啦，准备发文件。');
-      this.db.updateTask(task.id, {
-        status: 'completed',
-        resultKind: 'file',
-        resultPath: videoPath
-      });
-      return { filePath: videoPath };
-    }
-
-    if (task.requestType === 'image_analysis') {
-      const attachment = this.pickAttachment(task, attachments, 'image');
-      if (!attachment) {
-        throw new Error(
-          '没有找到可分析的图片。请先发送图片，或在同一条消息里 @ 我说明要分析什么。'
-        );
-      }
-      await progress.stage('图片我拿到啦，正在看细节。');
-      const text = await this.llm.vision(
-        task.prompt,
-        attachment.filePath,
-        attachment.mimeType,
-        signal,
-        system.content
-      );
-      await progress.stage('图里的信息已经捋好啦。');
-      return { text };
-    }
-
-    if (task.requestType === 'video_analysis') {
-      const attachment = this.pickAttachment(task, attachments, 'video');
-      if (!attachment) {
-        throw new Error(
-          '没有找到可分析的视频。请先发送视频，或在同一条消息里 @ 我说明要分析什么。'
-        );
-      }
-      await progress.stage('视频我拿到啦，正在看里面的内容。');
-      const text = await this.llm.video(
-        task.prompt,
-        attachment.filePath,
-        attachment.mimeType,
-        signal,
-        system.content
-      );
-      await progress.stage('视频里的重点已经捋好啦。');
-      return { text };
-    }
-
-    if (task.requestType === 'file_analysis') {
-      const attachment = this.pickAttachment(task, attachments, 'file');
-      if (!attachment) {
-        throw new Error(
-          '没有找到可处理的文件。请先发送文件，或在同一条消息里 @ 我说明要处理什么。'
-        );
-      }
-      const fileText = await this.fileService.extractText(attachment);
-      await progress.stage('文件内容已经读出来啦。');
-      const text = await this.llm.chat(
-        [
-          system,
-          {
-            role: 'user',
-            content: [
-              `用户请求：${task.prompt}`,
-              `文件名：${attachment.fileName}`,
-              '文件内容：',
-              fileText
-            ].join('\n\n')
-          }
-        ],
-        signal,
-        { temperature: steadyTaskTemperature }
-      );
-      await progress.stage('文件里的重点已经整理好啦。');
-      return { text };
-    }
-
-    if (task.requestType === 'web_search') {
-      const query = buildWebSearchQuery(task.prompt);
-      const roomContext = this.buildRoomContextTurn(task.roomId);
-      await progress.stage(`搜索词捋好啦：${query}`);
-
-      if (this.config.search.provider === 'brave') {
-        if (!this.webSearch?.configured()) {
-          throw new Error('联网搜索尚未配置。请配置 Brave Search API key 后重试。');
-        }
-
-        const searchResponse = await this.webSearch.search(query, signal);
-        const searchContext = formatWebSearchResultsForLlm(searchResponse);
-        await progress.stage('联网结果拿到了，我在核对来源。');
-        const text = await this.llm.chat(
-          [
-            system,
-            ...(roomContext ? [roomContext] : []),
-            {
-              role: 'user',
-              content: [
-                `用户问题：${task.prompt}`,
-                `实际搜索词：${searchResponse.query}`,
-                dateContext,
-                '请只基于下面的联网搜索结果回答；信息不足时明确说明。涉及天气、新闻、价格、赛程等强时效信息时，必须优先核对来源日期是否覆盖当前日期，不要把过期网页里的“今天”当成真正的今天。用微信纯文本，不要使用 Markdown。正文不要自行列来源，来源会由系统另附。',
-                `搜索结果：\n${searchContext}`
-              ].join('\n\n')
-            }
-          ],
-          signal,
-          { temperature: steadyTaskTemperature }
-        );
-        await progress.stage('回答和来源都整理好啦。');
-        return { text: appendPlainSources(text, searchResponse.results) };
-      }
-
-      if (!this.config.search.enabled) {
-        throw new Error('联网搜索尚未启用。请在配置中开启 search.enabled。');
-      }
-
-      const answer = await this.llm.chatWithWebSearch(
-        [
-          system,
-          ...(roomContext ? [roomContext] : []),
-          {
-            role: 'user',
-            content: [
-              `用户问题：${task.prompt}`,
-              `实际搜索词：${query}`,
-              dateContext,
-              '请联网搜索后回答；信息不足时明确说明。涉及天气、新闻、价格、赛程等强时效信息时，必须优先核对来源日期是否覆盖当前日期，不要把过期网页里的“今天”当成真正的今天。用微信纯文本，不要使用 Markdown。正文不要自行列来源，来源会由系统另附。'
-            ].join('\n\n')
-          }
-        ],
-        {
-          maxResults: this.config.search.count,
-          searchContextSize: this.config.search.searchContextSize,
-          engine: this.config.search.engine
-        },
-        signal
-      );
-      await progress.stage('联网回答和来源都整理好啦。');
-      return { text: appendPlainSources(answer.text, answer.sources) };
+      const result = this.llm.configured()
+        ? await this.executeAgentTask(task, attachments, signal, progress, system)
+        : await this.executeRegisteredTool(task, attachments, signal, progress, system);
+      return toolResultToTaskResult(result);
     }
 
     if (task.requestType === 'summary' || task.requestType === 'room_minutes') {
@@ -1438,13 +1261,198 @@ export class BotRequestRouter {
     signal: AbortSignal,
     progress: TaskProgressReporter,
     system: ChatTurn
-  ): Promise<{ text?: string; filePath?: string; imagePath?: string }> {
+  ): Promise<ToolResult> {
     const definition = this.tools.get(task.toolName!);
     if (!definition) {
       throw new Error(`未知工具：${task.toolName}`);
     }
 
     const parsedInput = this.tools.parseInput(definition, parseToolInput(task.toolInputJson));
+    return this.executeToolAction(
+      task,
+      definition,
+      parsedInput,
+      attachments,
+      signal,
+      progress,
+      system
+    );
+  }
+
+  private async executeAgentTask(
+    task: TaskRecord,
+    attachments: AttachmentRecord[],
+    signal: AbortSignal,
+    progress: TaskProgressReporter,
+    system: ChatTurn
+  ): Promise<ToolResult> {
+    const observations: AgentObservation[] = [];
+    const callSignatures = new Set<string>();
+    const suggestedInput = parseToolInput(task.toolInputJson);
+    const tools = this.availableAgentTools(task);
+    let lastResult: ToolResult | undefined;
+
+    if (tools.length === 0) {
+      throw new Error('当前没有可用于完成这个任务的工具。');
+    }
+
+    for (let step = 0; step < this.config.limits.maxAgentSteps; step += 1) {
+      const rawDecision = await this.llm.chat(
+        buildAgentMessages({
+          systemPrompt: system.content,
+          userPrompt: task.prompt,
+          requestType: task.requestType,
+          suggestedTool: task.toolName,
+          suggestedInput,
+          tools,
+          observations,
+          roomContext: this.buildRoomContextTurn(task.roomId),
+          maxToolOutputChars: this.config.tools.policy.maxToolOutputChars
+        }),
+        signal,
+        { temperature: 0 }
+      );
+      const decision = parseAgentDecision(rawDecision);
+      if (!decision) {
+        throw new Error('多步执行器没有返回有效的下一步 JSON。');
+      }
+
+      this.db.addAudit({
+        roomId: task.roomId,
+        userId: task.userId,
+        action: 'agent_step_decided',
+        details: {
+          taskId: task.id,
+          step: step + 1,
+          decision: decision.action,
+          toolName: decision.action === 'tool' ? decision.toolName : undefined
+        }
+      });
+
+      if (decision.action === 'finish') {
+        const completionError = validateAgentCompletion(task, observations);
+        if (completionError) {
+          observations.push({
+            toolName: 'agent.validation',
+            input: { action: 'finish', result: decision.result },
+            result: {
+              kind: 'text',
+              text: completionError,
+              summary: completionError
+            }
+          });
+          continue;
+        }
+        if (decision.result === 'last_tool') {
+          if (!lastResult) {
+            throw new Error('多步执行器在尚未调用工具时尝试结束任务。');
+          }
+          return lastResult;
+        }
+
+        const text = decision.text?.trim();
+        if (!text) {
+          throw new Error('多步执行器没有提供最终文本。');
+        }
+        return { kind: 'text', text, summary: text };
+      }
+
+      const definition = this.tools.get(decision.toolName);
+      if (!definition || !tools.some((tool) => tool.name === definition.name)) {
+        throw new Error(`多步执行器选择了不可用工具：${decision.toolName}`);
+      }
+      const validationMessage = validateAgentToolSequence(task, definition, observations);
+      if (validationMessage) {
+        observations.push({
+          toolName: 'agent.validation',
+          input: decision.input,
+          result: {
+            kind: 'text',
+            text: validationMessage,
+            summary: validationMessage
+          }
+        });
+        continue;
+      }
+      this.assertAgentToolAllowed(task, definition);
+      const parsedInput = this.tools.parseInput(definition, decision.input);
+      const signature = `${definition.name}:${stringifyToolInput(parsedInput)}`;
+      if (callSignatures.has(signature)) {
+        throw new Error(`多步执行器重复调用了相同工具：${definition.name}`);
+      }
+      callSignatures.add(signature);
+
+      const result = await this.executeToolAction(
+        task,
+        definition,
+        parsedInput,
+        attachments,
+        signal,
+        progress,
+        system
+      );
+      observations.push({ toolName: definition.name, input: parsedInput, result });
+      lastResult = result;
+      if (definition.terminalResult) {
+        return result;
+      }
+    }
+
+    throw new Error(`多步执行超过上限（${this.config.limits.maxAgentSteps} 步）。`);
+  }
+
+  private availableAgentTools(task: TaskRecord): AgentToolDescriptor[] {
+    return this.tools
+      .list()
+      .filter((definition) => {
+        if (definition.name === 'web.search' && !this.config.search.enabled) return false;
+        if (definition.name === 'voice.generate' && !this.llm.speechConfigured()) return false;
+        const policy = this.evaluateToolPolicy(task, definition);
+        return (
+          policy.action === 'allow' ||
+          (policy.action === 'require_approval' && this.db.hasApprovedApproval(task.id))
+        );
+      })
+      .map((definition) => ({
+        name: definition.name,
+        description: definition.description,
+        inputDescription: definition.inputDescription
+      }));
+  }
+
+  private assertAgentToolAllowed(task: TaskRecord, definition: ToolDefinition): void {
+    const policy = this.evaluateToolPolicy(task, definition);
+    if (policy.action === 'deny') {
+      throw new Error(`工具不可用：${definition.name}（${policy.reason}）`);
+    }
+    if (policy.action === 'require_approval' && !this.db.hasApprovedApproval(task.id)) {
+      throw new Error(`工具需要管理员审批：${definition.name}`);
+    }
+  }
+
+  private evaluateToolPolicy(task: TaskRecord, definition: ToolDefinition) {
+    const room = this.db.getRoomById(task.roomId);
+    if (!room) {
+      throw new Error(`任务所属群不存在：${task.roomId}`);
+    }
+    return this.toolPolicy.evaluate({
+      tool: definition,
+      prompt: task.prompt,
+      role: this.db.getUserRole(task.roomId, task.userId),
+      room,
+      hasApprover: this.hasApprover(task.roomId)
+    });
+  }
+
+  private async executeToolAction(
+    task: TaskRecord,
+    definition: ToolDefinition,
+    parsedInput: unknown,
+    attachments: AttachmentRecord[],
+    signal: AbortSignal,
+    progress: TaskProgressReporter,
+    system: ChatTurn
+  ): Promise<ToolResult> {
     const toolCall = this.db.createToolCall({
       taskId: task.id,
       roomId: task.roomId,
@@ -1497,11 +1505,7 @@ export class BotRequestRouter {
         details: { taskId: task.id, toolCallId: toolCall.id, toolName: definition.name }
       });
 
-      return {
-        text: result.text,
-        filePath: result.filePath,
-        imagePath: result.imagePath
-      };
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.db.updateToolCall(toolCall.id, {
@@ -1712,18 +1716,6 @@ function normalizeMemoryText(text?: string): string {
   return normalized.length > 1000 ? `${normalized.slice(0, 1000)}...` : normalized;
 }
 
-function promptNeedsReferenceImage(prompt: string): boolean {
-  return /(这张图|这张图片|这张照片|这个图|刚才的图|刚才图片|刚才照片|上一张|上张|参考图|原图|图生视频|image[- ]?to[- ]?video|把.+动起来|让.+动起来|使.+动起来|让(?:它|他|她).*(?:跳|舞|走|跑|转|眨眼|挥手|说话|唱歌|表演|摇摆|飞)|把(?:它|他|她).*(?:跳|舞|走|跑|转|眨眼|挥手|说话|唱歌|表演|摇摆|飞)|animate)/i.test(
-    prompt
-  );
-}
-
-function promptReferencesImageForGeneration(prompt: string): boolean {
-  return /(这张图|这张图片|这张照片|这个图|这个图片|上一张|上张|前一张|刚才的图|刚才图片|刚才的照片|刚刚的图|参考图|参考图片|原图|照片中|图片中|图里|照片里|按照这张|参考这张|基于这张|用这张|把它|把他|把她|让它|让他|让她)/i.test(
-    prompt
-  );
-}
-
 function shouldUseStepOutput(requestType: RequestKind): boolean {
   return [
     'file_analysis',
@@ -1782,26 +1774,71 @@ function compactProgressText(text: string): string {
     : compact;
 }
 
-function buildWebSearchQuery(prompt: string): string {
-  const query = prompt
-    .replace(
-      /^(?:请|麻烦|帮我)?\s*(?:联网|上网)?\s*(?:搜索一下|帮我搜一下|帮我查一下|搜一下|查一下|搜索|搜|帮我搜|帮我查|查询|查找|查资料|查新闻)[:：]?\s*/i,
-      ''
-    )
-    .replace(/^(?:请|麻烦)?\s*(?:帮我)?\s*(?:看一下|看下|看看|看一看)[:：]?\s*/i, '')
-    .replace(/^(?:请|麻烦|帮我)?\s*(?:联网|上网)\s*/i, '')
-    .trim();
-  const normalized = query || prompt.trim();
-  if (needsTemporalSearchAnchor(normalized)) {
-    return `${normalized} ${currentBeijingDateLabel()}`;
-  }
-  return normalized;
+function toolResultToTaskResult(
+  result: ToolResult
+): { text?: string; filePath?: string; imagePath?: string } {
+  return {
+    text: result.text,
+    filePath: result.filePath,
+    imagePath: result.imagePath
+  };
 }
 
-function needsTemporalSearchAnchor(query: string): boolean {
-  return /(今天|今日|今年|本年|本年度|明年|去年|明天|昨天|昨日|本周|这周|本月|最近|当前|现在|实时|最新|天气|预报|新闻|价格|汇率|赛程|股价|政策|公告|发布|上线|更新)/i.test(
-    query
+function validateAgentToolSequence(
+  task: TaskRecord,
+  definition: ToolDefinition,
+  observations: AgentObservation[]
+): string | undefined {
+  if (definition.name !== 'voice.generate' || !promptReferencesNamedWork(task.prompt)) {
+    return undefined;
+  }
+
+  const lastSearchIndex = findLastObservationIndex(observations, 'web.search');
+  if (lastSearchIndex < 0) return undefined;
+  const lastPreparationIndex = findLastObservationIndex(observations, 'text.prepare');
+  if (lastPreparationIndex > lastSearchIndex) {
+    const preparationInput = observations[lastPreparationIndex]?.input;
+    if (
+      preparationInput &&
+      typeof preparationInput === 'object' &&
+      typeof (preparationInput as Record<string, unknown>).startMarker === 'string' &&
+      typeof (preparationInput as Record<string, unknown>).endMarker === 'string'
+    ) {
+      return undefined;
+    }
+  }
+  return '不能把命名作品的搜索结果直接送入语音合成。请先调用 text.prepare，并同时提供 startMarker 与 endMarker，只截取指定作品的完整正文，去掉标题、注释、译文、来源和相邻作品。';
+}
+
+function validateAgentCompletion(
+  task: TaskRecord,
+  observations: AgentObservation[]
+): string | undefined {
+  if (!task.toolName) return undefined;
+  const lastRealObservation = [...observations]
+    .reverse()
+    .find((observation) => observation.toolName !== 'agent.validation');
+  if (lastRealObservation?.toolName === task.toolName) return undefined;
+  return `任务尚未完成：最终必须调用目标工具 ${task.toolName}，不能停在中间处理步骤。`;
+}
+
+function promptReferencesNamedWork(prompt: string): boolean {
+  return (
+    /《[^》]{1,80}》/.test(prompt) ||
+    /(?:朗读|读|念|播报)(?:一下)?\s*[\p{Script=Han}A-Za-z0-9·]{2,30}(?:序|赋|传|记|诗|词|歌|曲|文|书)/u.test(
+      prompt
+    )
   );
+}
+
+function findLastObservationIndex(
+  observations: AgentObservation[],
+  toolName: string
+): number {
+  for (let index = observations.length - 1; index >= 0; index -= 1) {
+    if (observations[index]?.toolName === toolName) return index;
+  }
+  return -1;
 }
 
 function truncateRoomContextEntry(content: string): string {
