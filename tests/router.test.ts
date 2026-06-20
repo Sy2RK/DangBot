@@ -281,7 +281,7 @@ describe('BotRequestRouter', () => {
     );
 
     await vi.waitFor(() => expect(responder.files).toContain('/tmp/mock.mp3'));
-    expect(responder.texts).toEqual(['好哒，我这就伸爪把它合成语音文件发你，喵～']);
+    expect(responder.texts).toEqual(['好哒，我这就念给你听，喵～']);
     expect(voiceCalls).toEqual(['请作为文件发送']);
     expect(db.listRoomTasks('room1', 1)[0]).toMatchObject({
       requestType: 'voice_generation',

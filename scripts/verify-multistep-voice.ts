@@ -136,6 +136,7 @@ async function main(): Promise<void> {
     toolCalls[0]?.toolName !== 'web.search' ||
     toolCalls[1]?.toolName !== 'text.prepare' ||
     toolCalls[2]?.toolName !== 'voice.generate' ||
+    responder.texts[0] !== '好哒，我这就念给你听，喵～' ||
     outputBytes <= 0 ||
     voiceInput.length < 500 ||
     report.containsCommandFiller ||
