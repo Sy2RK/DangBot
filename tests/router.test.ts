@@ -204,8 +204,8 @@ describe('BotRequestRouter', () => {
     expect(latestSystemPrompt).toContain('默认使用中文');
   });
 
-  it('delivers image and video generation results', async () => {
-    const { router, db } = await setup({ enabled: true, adminless: true });
+  it('delivers image, voice, and video generation results as supported media', async () => {
+    const { router, db, voiceCalls } = await setup({ enabled: true, adminless: true });
     const responder = new MemoryResponder();
 
     await router.handleMessage(
@@ -213,6 +213,13 @@ describe('BotRequestRouter', () => {
       responder
     );
     await vi.waitFor(() => expect(responder.images).toContain('/tmp/mock.png'));
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '生成语音：今天也要开心呀' }),
+      responder
+    );
+    await vi.waitFor(() => expect(responder.files).toContain('/tmp/mock.mp3'));
+    expect(voiceCalls).toEqual(['今天也要开心呀']);
 
     await router.handleMessage(
       message({ mentioned: true, mentionText: '生成视频：一只猫慢慢伸懒腰' }),
@@ -225,12 +232,20 @@ describe('BotRequestRouter', () => {
       tasks.some((task) => task.requestType === 'image_generation' && task.resultKind === 'image')
     ).toBe(true);
     expect(
+      tasks.some((task) => task.requestType === 'voice_generation' && task.resultKind === 'file')
+    ).toBe(true);
+    expect(
       tasks.some((task) => task.requestType === 'video_generation' && task.resultKind === 'file')
     ).toBe(true);
     const imageTask = tasks.find((task) => task.requestType === 'image_generation');
+    const voiceTask = tasks.find((task) => task.requestType === 'voice_generation');
     const videoTask = tasks.find((task) => task.requestType === 'video_generation');
     expect(imageTask ? db.listTaskToolCalls(imageTask.id).at(0) : undefined).toMatchObject({
       toolName: 'image.generate',
+      status: 'completed'
+    });
+    expect(voiceTask ? db.listTaskToolCalls(voiceTask.id).at(0) : undefined).toMatchObject({
+      toolName: 'voice.generate',
       status: 'completed'
     });
     expect(videoTask ? db.listTaskToolCalls(videoTask.id).at(0) : undefined).toMatchObject({
@@ -253,6 +268,25 @@ describe('BotRequestRouter', () => {
       requestType: 'video_generation',
       toolName: 'video.generate',
       status: 'waiting_approval'
+    });
+  });
+
+  it('runs voice generation through the normal file delivery path', async () => {
+    const { router, db, voiceCalls } = await setup({ enabled: true, adminless: true });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '生成语音：请作为文件发送' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toContain('/tmp/mock.mp3'));
+    expect(voiceCalls).toEqual(['请作为文件发送']);
+    expect(db.listRoomTasks('room1', 1)[0]).toMatchObject({
+      requestType: 'voice_generation',
+      resultKind: 'file',
+      resultPath: '/tmp/mock.mp3',
+      status: 'completed'
     });
   });
 
@@ -773,6 +807,43 @@ describe('BotRequestRouter', () => {
       status: 'completed'
     });
   });
+
+  it('does not report a scheduled task as successful when its tool fails', async () => {
+    const { router, db } = await setup({
+      enabled: true,
+      generateVoice: async () => {
+        throw new Error('speech failed');
+      }
+    });
+    const responder = new MemoryResponder();
+    const automation = db.createAutomation({
+      roomId: 'room1',
+      creatorId: 'admin',
+      name: '语音失败测试',
+      kind: 'scheduled_prompt',
+      requestType: 'voice_generation',
+      scheduleType: 'once',
+      scheduleSpecJson: JSON.stringify({
+        type: 'once',
+        at: '2026-06-05T01:40:00.000Z',
+        label: '立即'
+      }),
+      timezone: 'Asia/Shanghai',
+      prompt: '生成语音：测试',
+      toolName: 'voice.generate',
+      toolInputJson: JSON.stringify({ text: '测试' }),
+      nextRunAt: '2026-06-05T01:40:00.000Z'
+    });
+
+    await expect(router.handleAutomationTrigger(automation, responder)).rejects.toThrow(
+      'speech failed'
+    );
+    expect(db.listRoomTasks('room1', 1)[0]).toMatchObject({
+      requestType: 'voice_generation',
+      status: 'failed',
+      error: 'speech failed'
+    });
+  });
 });
 
 async function setup(
@@ -785,6 +856,7 @@ async function setup(
       options?: { temperature?: number }
     ) => Promise<string>;
     intent?: RequestKind | ((classificationPrompt: string) => RequestKind);
+    generateVoice?: (text: string) => Promise<{ filePath: string }>;
     searchEnabled?: boolean;
     maxReplyTextChars?: number;
     denyTools?: string[];
@@ -822,12 +894,14 @@ async function setup(
   const intentCalls: Array<Array<{ role: string; content: string }>> = [];
   const automationCalls: Array<Array<{ role: string; content: string }>> = [];
   const videoCalls: Array<{ frameImagePath?: string }> = [];
+  const voiceCalls: string[] = [];
   const searchCalls: Array<{
     content: string;
     options: { maxResults: number; searchContextSize: string };
   }> = [];
   const llm = {
     configured: () => true,
+    speechConfigured: () => true,
     chat: async (
       messages: Array<{ role: string; content: string }>,
       signal?: AbortSignal,
@@ -856,6 +930,11 @@ async function setup(
     vision: async () => 'mock vision',
     video: async () => 'mock video',
     generateImage: async () => '/tmp/mock.png',
+    generateVoice: async (text: string) => {
+      voiceCalls.push(text);
+      if (options.generateVoice) return options.generateVoice(text);
+      return { filePath: '/tmp/mock.mp3' };
+    },
     generateVideo: async (_prompt: string, options: { frameImagePath?: string }) => {
       videoCalls.push(options);
       return '/tmp/mock.mp4';
@@ -884,7 +963,17 @@ async function setup(
     undefined,
     undefined
   );
-  return { router, db, chatCalls, chatOptions, intentCalls, automationCalls, videoCalls, searchCalls };
+  return {
+    router,
+    db,
+    chatCalls,
+    chatOptions,
+    intentCalls,
+    automationCalls,
+    videoCalls,
+    voiceCalls,
+    searchCalls
+  };
 }
 
 function isIntentClassificationCall(messages: Array<{ role: string; content: string }>): boolean {
@@ -950,6 +1039,13 @@ function classifyIntentForRouterTest(classificationPrompt: string): RequestKind 
   }
   if (classificationPrompt.includes('生成图片') || classificationPrompt.includes('画图')) {
     return 'image_generation';
+  }
+  if (
+    classificationPrompt.includes('生成语音') ||
+    classificationPrompt.includes('合成语音') ||
+    classificationPrompt.includes('朗读')
+  ) {
+    return 'voice_generation';
   }
   if (classificationPrompt.includes('总结刚才的文件')) return 'file_analysis';
   if (classificationPrompt.includes('最近讨论总结')) return 'summary';

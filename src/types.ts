@@ -36,6 +36,7 @@ export type RequestKind =
   | 'image_analysis'
   | 'video_analysis'
   | 'image_generation'
+  | 'voice_generation'
   | 'video_generation'
   | 'report'
   | 'room_minutes'
@@ -76,6 +77,14 @@ export interface AppConfig {
     visionModel: string;
     imageModel?: string;
     videoModel?: string;
+    tts: {
+      enabled: boolean;
+      baseURL: string;
+      apiKey: string;
+      resourceId: string;
+      voice: string;
+      speechRate: number;
+    };
   };
   search: {
     enabled: boolean;
@@ -109,6 +118,7 @@ export interface AppConfig {
     roomRequestsPerMinute: number;
     fileTasksPerMinute: number;
     imageTasksPerMinute: number;
+    voiceTasksPerMinute: number;
     videoTasksPerMinute: number;
     searchTasksPerMinute: number;
     maxConcurrentTasks: number;

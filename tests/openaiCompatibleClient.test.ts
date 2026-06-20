@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFile } from 'node:fs/promises';
 import {
   OpenAICompatibleClient,
   parseVideoDurationSeconds
@@ -54,5 +55,106 @@ describe('OpenAICompatibleClient video generation', () => {
       duration: 5,
       resolution: '720p'
     });
+  });
+
+  it('writes Doubao speech chunks as an MP3 file', async () => {
+    const config = await makeTestConfig({
+      llm: {
+        tts: {
+          enabled: true,
+          apiKey: 'speech-key',
+          resourceId: 'seed-tts-2.0',
+          voice: 'zh_male_tiancaitongsheng_uranus_bigtts',
+          speechRate: 10
+        }
+      }
+    });
+    const client = new OpenAICompatibleClient(config.llm, config.storage.outputsDir);
+    let submittedBody: Record<string, unknown> | undefined;
+    let apiKey = '';
+    let resourceId = '';
+    const mp3 = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00]);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        expect(String(url)).toBe('https://openspeech.bytedance.com/api/v3/tts/unidirectional');
+        submittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const headers = new Headers(init?.headers);
+        apiKey = headers.get('x-api-key') ?? '';
+        resourceId = headers.get('x-api-resource-id') ?? '';
+        return new Response(
+          [
+            JSON.stringify({
+              code: 0,
+              message: 'OK',
+              data: mp3.toString('base64')
+            }),
+            JSON.stringify({ code: 20_000_000, message: 'OK' })
+          ].join('\n'),
+          {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/x-ndjson',
+              'X-Tt-Logid': 'test-logid'
+            }
+          }
+        );
+      })
+    );
+
+    const voice = await client.generateVoice('今天也要开心呀');
+
+    expect(client.speechConfigured()).toBe(true);
+    expect(submittedBody).toMatchObject({
+      req_params: {
+        text: '今天也要开心呀',
+        speaker: 'zh_male_tiancaitongsheng_uranus_bigtts',
+        audio_params: {
+          format: 'mp3',
+          sample_rate: 24_000,
+          speech_rate: 10
+        }
+      }
+    });
+    expect(apiKey).toBe('speech-key');
+    expect(resourceId).toBe('seed-tts-2.0');
+    expect(voice.filePath.endsWith('.mp3')).toBe(true);
+    expect(await readFile(voice.filePath)).toEqual(mp3);
+  });
+
+  it('rejects a successful Doubao response that is not MP3 audio', async () => {
+    const config = await makeTestConfig({
+      llm: {
+        tts: {
+          enabled: true,
+          apiKey: 'speech-key'
+        }
+      }
+    });
+    const client = new OpenAICompatibleClient(config.llm, config.storage.outputsDir);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        return new Response(
+          [
+            JSON.stringify({
+              code: 0,
+              message: 'OK',
+              data: Buffer.from('not mp3').toString('base64')
+            }),
+            JSON.stringify({ code: 20_000_000, message: 'OK' })
+          ].join('\n'),
+          {
+            status: 200,
+            headers: { 'X-Tt-Logid': 'invalid-audio-logid' }
+          }
+        );
+      })
+    );
+
+    await expect(client.generateVoice('测试')).rejects.toThrow(
+      '豆包语音合成返回的内容不是有效 MP3（logid: invalid-audio-logid）'
+    );
   });
 });

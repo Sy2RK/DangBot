@@ -7,6 +7,8 @@ interface QueueItem {
   longRunning: boolean;
   timeoutMs?: number;
   handler: (signal: AbortSignal) => Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
 }
 
 export class TaskQueue {
@@ -25,15 +27,23 @@ export class TaskQueue {
     }
   ) {}
 
-  enqueue(task: TaskRecord, handler: (signal: AbortSignal) => Promise<void>, longRunning = false, timeoutMs?: number): void {
-    this.queue.push({ task, handler, longRunning, timeoutMs });
-    this.drain();
+  enqueue(
+    task: TaskRecord,
+    handler: (signal: AbortSignal) => Promise<void>,
+    longRunning = false,
+    timeoutMs?: number
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.queue.push({ task, handler, longRunning, timeoutMs, resolve, reject });
+      this.drain();
+    });
   }
 
   cancel(taskId: string): boolean {
     const queuedIndex = this.queue.findIndex((item) => item.task.id === taskId);
     if (queuedIndex >= 0) {
-      this.queue.splice(queuedIndex, 1);
+      const [item] = this.queue.splice(queuedIndex, 1);
+      item?.reject(new Error('任务已取消。'));
       return true;
     }
 
@@ -75,7 +85,10 @@ export class TaskQueue {
 
     try {
       const current = this.db.getTask(item.task.id);
-      if (!current || current.status === 'cancelled') return;
+      if (!current || current.status === 'cancelled') {
+        item.resolve();
+        return;
+      }
 
       this.db.updateTask(item.task.id, { status: 'processing' });
       await item.handler(abort.signal);
@@ -84,12 +97,17 @@ export class TaskQueue {
       if (after?.status === 'processing') {
         this.db.updateTask(item.task.id, { status: 'completed' });
       }
+      item.resolve();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const current = this.db.getTask(item.task.id);
-      if (current?.status === 'cancelled') return;
+      if (current?.status === 'cancelled') {
+        item.resolve();
+        return;
+      }
       this.logger.error({ error, taskId: item.task.id }, 'task failed');
       this.db.updateTask(item.task.id, { status: 'failed', error: message });
+      item.reject(error);
     } finally {
       clearTimeout(timeout);
       this.runningTasks.delete(item.task.id);

@@ -64,6 +64,7 @@ describe('intentClassifier', () => {
       'video_generation'
     );
     expect(parseRequestKind('WEB_SEARCH')).toBe('web_search');
+    expect(parseRequestKind('{"requestType":"voice_generation"}')).toBe('voice_generation');
   });
 
   it('does not fall back to regex-like local intent rules when LLM output is invalid', async () => {

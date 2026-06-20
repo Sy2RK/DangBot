@@ -73,6 +73,10 @@ export interface ImageGenerationOptions {
   referenceImageMimeType?: string;
 }
 
+export interface VoiceGenerationResult {
+  filePath: string;
+}
+
 export interface WebSearchToolOptions {
   maxResults: number;
   searchContextSize: 'low' | 'medium' | 'high';
@@ -98,6 +102,12 @@ interface ApiErrorResponse {
     | string;
 }
 
+interface DoubaoTtsStreamMessage {
+  code?: number;
+  message?: string;
+  data?: string;
+}
+
 export class OpenAICompatibleClient {
   constructor(
     private readonly config: AppConfig['llm'],
@@ -107,6 +117,10 @@ export class OpenAICompatibleClient {
 
   configured(): boolean {
     return this.config.apiKey.trim().length > 0;
+  }
+
+  speechConfigured(): boolean {
+    return this.config.tts.enabled && this.config.tts.apiKey.trim().length > 0;
   }
 
   async chat(
@@ -263,6 +277,62 @@ export class OpenAICompatibleClient {
 
     const imageUrl = readGeneratedImageUrl(response);
     return this.saveGeneratedImage(imageUrl, signal);
+  }
+
+  async generateVoice(input: string, signal?: AbortSignal): Promise<VoiceGenerationResult> {
+    if (!this.speechConfigured()) {
+      throw new Error('语音合成尚未配置。请启用 llm.tts 并设置语音服务 API key。');
+    }
+
+    const text = input.trim();
+    if (!text) {
+      throw new Error('没有找到需要合成的文字。');
+    }
+    if (text.length > 4096) {
+      throw new Error('语音合成文字不能超过 4096 个字符。');
+    }
+
+    const body = {
+      req_params: {
+        text,
+        speaker: this.config.tts.voice,
+        audio_params: {
+          format: 'mp3',
+          sample_rate: 24_000,
+          speech_rate: this.config.tts.speechRate
+        }
+      }
+    };
+
+    let response: Response;
+    try {
+      response = await fetch(this.resolveSpeechApiUrl('/tts/unidirectional'), {
+        method: 'POST',
+        headers: this.speechAuthHeaders(),
+        body: JSON.stringify(body),
+        signal
+      });
+    } catch (error) {
+      throw new Error(`语音合成网络失败：${describeNetworkError(error)}`);
+    }
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      const detail = readApiErrorText(responseText);
+      throw new Error(
+        detail
+          ? `语音合成失败：HTTP ${response.status} ${detail}`
+          : `语音合成失败：HTTP ${response.status}`
+      );
+    }
+
+    const responseText = await response.text();
+    const audio = readDoubaoTtsAudio(responseText, response.headers.get('x-tt-logid'));
+
+    await ensureDir(this.outputsDir);
+    const outputPath = path.join(this.outputsDir, `voice_${randomUUID()}.mp3`);
+    await writeFile(outputPath, audio);
+    return { filePath: outputPath };
   }
 
   async generateVideo(
@@ -425,6 +495,12 @@ export class OpenAICompatibleClient {
     return `${baseURL}${urlOrEndpoint.startsWith('/') ? urlOrEndpoint : `/${urlOrEndpoint}`}`;
   }
 
+  private resolveSpeechApiUrl(urlOrEndpoint: string): string {
+    if (/^https?:\/\//i.test(urlOrEndpoint)) return urlOrEndpoint;
+    const baseURL = this.config.tts.baseURL.replace(/\/+$/, '');
+    return `${baseURL}${urlOrEndpoint.startsWith('/') ? urlOrEndpoint : `/${urlOrEndpoint}`}`;
+  }
+
   private shouldSendAuth(url: string): boolean {
     const requestUrl = new URL(url);
     const baseUrl = new URL(this.config.baseURL);
@@ -437,6 +513,71 @@ export class OpenAICompatibleClient {
       ...(options.json ? { 'Content-Type': 'application/json' } : {})
     };
   }
+
+  private speechAuthHeaders(): Record<string, string> {
+    return {
+      'X-Api-Key': this.config.tts.apiKey,
+      'X-Api-Resource-Id': this.config.tts.resourceId,
+      'Content-Type': 'application/json'
+    };
+  }
+}
+
+function readDoubaoTtsAudio(responseText: string, logId: string | null): Buffer {
+  const audioChunks: Buffer[] = [];
+  let finished = false;
+
+  for (const line of responseText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    let message: DoubaoTtsStreamMessage;
+    try {
+      message = JSON.parse(trimmed) as DoubaoTtsStreamMessage;
+    } catch {
+      throw new Error(`豆包语音合成返回了无效响应${formatDoubaoLogId(logId)}。`);
+    }
+
+    if (message.code === 0) {
+      if (message.data) {
+        audioChunks.push(Buffer.from(message.data, 'base64'));
+      }
+      continue;
+    }
+
+    if (message.code === 20_000_000) {
+      finished = true;
+      continue;
+    }
+
+    if (message.code !== undefined) {
+      const detail = message.message?.trim() || `错误码 ${message.code}`;
+      throw new Error(`豆包语音合成失败：${detail}${formatDoubaoLogId(logId)}。`);
+    }
+  }
+
+  if (!finished) {
+    throw new Error(`豆包语音合成响应未正常结束${formatDoubaoLogId(logId)}。`);
+  }
+
+  const audio = Buffer.concat(audioChunks);
+  if (audio.length === 0) {
+    throw new Error(`豆包语音合成返回了空音频${formatDoubaoLogId(logId)}。`);
+  }
+  if (!isMp3(audio)) {
+    throw new Error(`豆包语音合成返回的内容不是有效 MP3${formatDoubaoLogId(logId)}。`);
+  }
+  return audio;
+}
+
+function isMp3(audio: Buffer): boolean {
+  if (audio.length < 3) return false;
+  if (audio.subarray(0, 3).toString('ascii') === 'ID3') return true;
+  return audio[0] === 0xff && (audio[1]! & 0xe0) === 0xe0;
+}
+
+function formatDoubaoLogId(logId: string | null): string {
+  return logId ? `（logid: ${logId}）` : '';
 }
 
 function parseJsonResponse<T>(text: string): T & ApiErrorResponse {
@@ -592,6 +733,16 @@ function readApiError(response: ApiErrorResponse): string | undefined {
   if (!response.error) return undefined;
   if (typeof response.error === 'string') return response.error;
   return response.error.message;
+}
+
+function readApiErrorText(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  try {
+    return readApiError(JSON.parse(trimmed) as ApiErrorResponse) ?? trimmed.slice(0, 300);
+  } catch {
+    return trimmed.slice(0, 300);
+  }
 }
 
 function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {

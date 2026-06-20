@@ -54,7 +54,24 @@ const configSchema = z.object({
     textModel: z.string().default('gpt-4.1-mini'),
     visionModel: z.string().default('gpt-4.1-mini'),
     imageModel: z.string().optional(),
-    videoModel: z.string().optional()
+    videoModel: z.string().optional(),
+    tts: z
+      .object({
+        enabled: booleanishSchema.default(false),
+        baseURL: z.string().url().default('https://openspeech.bytedance.com/api/v3'),
+        apiKey: z.string().default(''),
+        resourceId: z.string().min(1).default('seed-tts-2.0'),
+        voice: z.string().min(1).default('zh_male_tiancaitongsheng_uranus_bigtts'),
+        speechRate: z.number().int().min(-50).max(100).default(0)
+      })
+      .default({
+        enabled: false,
+        baseURL: 'https://openspeech.bytedance.com/api/v3',
+        apiKey: '',
+        resourceId: 'seed-tts-2.0',
+        voice: 'zh_male_tiancaitongsheng_uranus_bigtts',
+        speechRate: 0
+      })
   }),
   search: z
     .object({
@@ -122,6 +139,7 @@ const configSchema = z.object({
     roomRequestsPerMinute: z.number().int().positive().default(30),
     fileTasksPerMinute: z.number().int().positive().default(3),
     imageTasksPerMinute: z.number().int().positive().default(6),
+    voiceTasksPerMinute: z.number().int().positive().default(4),
     videoTasksPerMinute: z.number().int().positive().default(2),
     searchTasksPerMinute: z.number().int().positive().default(6),
     maxConcurrentTasks: z.number().int().positive().default(2),

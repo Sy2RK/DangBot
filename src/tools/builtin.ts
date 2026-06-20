@@ -13,6 +13,10 @@ const promptInput = z.object({
   prompt: z.string().min(1)
 });
 
+const voiceInput = z.object({
+  text: z.string().min(1).max(4096)
+});
+
 export function createBuiltinToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   for (const definition of builtinToolDefinitions()) {
@@ -33,6 +37,8 @@ export function toolNameForRequestKind(requestType: RequestKind): string | undef
       return 'video.analyze';
     case 'image_generation':
       return 'image.generate';
+    case 'voice_generation':
+      return 'voice.generate';
     case 'video_generation':
       return 'video.generate';
     default:
@@ -43,6 +49,9 @@ export function toolNameForRequestKind(requestType: RequestKind): string | undef
 export function buildToolInputForRequest(requestType: RequestKind, prompt: string): unknown {
   if (requestType === 'web_search') {
     return { prompt, query: buildWebSearchQuery(prompt) };
+  }
+  if (requestType === 'voice_generation') {
+    return { text: extractSpeechText(prompt) };
   }
   return { prompt };
 }
@@ -93,6 +102,15 @@ function builtinToolDefinitions(): ToolDefinition[] {
       execute: executeImageGeneration
     },
     {
+      name: 'voice.generate',
+      description: '把指定文字合成为 MP3 语音文件并发送。',
+      inputSchema: voiceInput,
+      riskLevel: 'medium',
+      allowedRoles: ['member', 'group_admin', 'system_admin'],
+      capabilities: { network: true },
+      execute: executeVoiceGeneration
+    },
+    {
       name: 'video.generate',
       description: '生成视频或基于图片首帧生成视频。',
       inputSchema: promptInput,
@@ -101,6 +119,20 @@ function builtinToolDefinitions(): ToolDefinition[] {
       execute: executeVideoGeneration
     }
   ];
+}
+
+async function executeVoiceGeneration(
+  ctx: ToolExecutionContext,
+  input: z.infer<typeof voiceInput>
+) {
+  await ctx.stage('要朗读的文字看清啦，准备合成语音。');
+  const voice = await ctx.llm.generateVoice(input.text, ctx.signal);
+  await ctx.stage('语音已经合成好啦，准备发送 MP3 文件。');
+  return {
+    kind: 'file' as const,
+    filePath: voice.filePath,
+    summary: voice.filePath
+  };
 }
 
 async function executeImageGeneration(ctx: ToolExecutionContext, input: z.infer<typeof promptInput>) {
@@ -267,6 +299,36 @@ export function buildWebSearchQuery(prompt: string): string {
     return `${normalized} ${currentBeijingDateLabel()}`;
   }
   return normalized;
+}
+
+export function extractSpeechText(prompt: string): string {
+  const normalized = prompt.trim();
+  const quoted = normalized.match(
+    /[“"「『](.+?)[”"」』]\s*(?:合成|生成|转换成|做成).*(?:语音|音频)/s
+  );
+  if (quoted?.[1]?.trim()) return quoted[1].trim();
+
+  const converted = normalized.match(
+    /^(?:请|麻烦|帮我)?\s*把\s*(.+?)\s*(?:合成|生成|转换成|做成)\s*(?:语音|音频)\s*[。！!？?]*$/s
+  );
+  if (converted?.[1]?.trim()) return converted[1].trim();
+
+  const withoutCommand = normalized
+    .replace(
+      /^(?:请|麻烦|帮我)?\s*(?:生成|合成|制作)\s*(?:一段|一个)?\s*(?:语音|音频)\s*[:：]?\s*/i,
+      ''
+    )
+    .replace(
+      /^(?:请|麻烦|帮我)?\s*(?:用|以)\s*(?:语音|声音)\s*(?:说|朗读|读出|念出|播报)?\s*[:：]?\s*/i,
+      ''
+    )
+    .replace(
+      /^(?:请|麻烦|帮我)?\s*(?:朗读|读一下|读出来|念一下|念出来|播报)\s*[:：]?\s*/i,
+      ''
+    )
+    .trim();
+
+  return withoutCommand || normalized;
 }
 
 function needsTemporalSearchAnchor(query: string): boolean {

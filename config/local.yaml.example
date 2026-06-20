@@ -13,6 +13,14 @@ llm:
   visionModel: ${OPENAI_VISION_MODEL:-qwen/qwen3.7-plus}
   imageModel: ${OPENAI_IMAGE_MODEL:-bytedance-seed/seedream-4.5}
   videoModel: ${OPENAI_VIDEO_MODEL:-bytedance/seedance-2.0}
+  tts:
+    enabled: ${DOUBAO_TTS_ENABLED:-false}
+    baseURL: ${DOUBAO_TTS_BASE_URL:-https://openspeech.bytedance.com/api/v3}
+    apiKey: ${DOUBAO_TTS_API_KEY:-}
+    resourceId: ${DOUBAO_TTS_RESOURCE_ID:-seed-tts-2.0}
+    voice: ${DOUBAO_TTS_VOICE:-zh_male_tiancaitongsheng_uranus_bigtts}
+    # -50 is 0.5x; 0 is normal; 100 is 2x.
+    speechRate: 0
 search:
   enabled: ${WEB_SEARCH_ENABLED:-false}
   provider: ${WEB_SEARCH_PROVIDER:-openrouter}
@@ -33,6 +41,7 @@ tools:
     denyTools: []
     roomToolOverrides: []
 limits:
+  voiceTasksPerMinute: 4
   videoTasksPerMinute: 2
   searchTasksPerMinute: 6
   videoGenerationTimeoutMs: 600000

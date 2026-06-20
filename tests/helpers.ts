@@ -38,7 +38,15 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       textModel: 'test-text',
       visionModel: 'test-vision',
       imageModel: 'test-image',
-      videoModel: 'test-video'
+      videoModel: 'test-video',
+      tts: {
+        enabled: false,
+        baseURL: 'https://openspeech.bytedance.com/api/v3',
+        apiKey: '',
+        resourceId: 'seed-tts-2.0',
+        voice: 'zh_male_tiancaitongsheng_uranus_bigtts',
+        speechRate: 0
+      }
     },
     search: {
       enabled: false,
@@ -66,6 +74,7 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       roomRequestsPerMinute: 30,
       fileTasksPerMinute: 3,
       imageTasksPerMinute: 6,
+      voiceTasksPerMinute: 4,
       videoTasksPerMinute: 2,
       searchTasksPerMinute: 6,
       maxConcurrentTasks: 2,
@@ -112,7 +121,11 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
     wechat: { ...base.wechat, ...overrides.wechat },
     storage: { ...base.storage, ...overrides.storage },
     logging: { ...base.logging, ...overrides.logging },
-    llm: { ...base.llm, ...overrides.llm },
+    llm: {
+      ...base.llm,
+      ...overrides.llm,
+      tts: { ...base.llm.tts, ...overrides.llm?.tts }
+    },
     search: { ...base.search, ...overrides.search },
     tools: {
       ...base.tools,

@@ -5,7 +5,8 @@
 1. 复制 `config/local.yaml.example` 为 `config/local.yaml`。
 2. 填入机器人名称和授权群 `room id`。如确需按群名首次绑定，显式设置 `auth.allowTopicRoomBinding: true`，并确认群名没有重名。默认可以不配置管理员，机器人会以无管理员模式运行。
 3. 配置 `OPENAI_API_KEY`，或在 `config/local.yaml` 中填写 OpenAI-compatible `llm.apiKey`、`baseURL` 和模型名。
-4. 运行 `pnpm install`。如果 pnpm 提示忽略构建脚本，确认 `package.json` 的 `pnpm.onlyBuiltDependencies` 后重新安装。
+4. 如需语音文件，启用豆包 `llm.tts`；资源 ID 使用 `seed-tts-2.0`，音色使用 `zh_male_tiancaitongsheng_uranus_bigtts`。
+5. 运行 `pnpm install`。如果 pnpm 提示忽略构建脚本，确认 `package.json` 的 `pnpm.onlyBuiltDependencies` 后重新安装。
 
 ## 基础验收
 
@@ -27,6 +28,13 @@
 7. 用户发送图片，再发送 `@DangBot 把这张图动起来`，机器人应使用最近图片作为首帧生成视频。
 8. 上传超过限制或不支持的文件类型，机器人应返回明确错误。
 9. 长结果应以 `.txt` 纯文本文件回传，群聊提示和文件内容都不应包含 Markdown 格式。
+
+## 语音文件
+
+1. 发送 `@DangBot 生成语音：今天也要开心呀`，机器人应只合成“今天也要开心呀”。
+2. 请求应调用豆包 `seed-tts-2.0`，并使用音色 `zh_male_tiancaitongsheng_uranus_bigtts`。
+3. 接收方应收到可下载和播放的 `.mp3` 文件。
+4. 任务与工具调用应分别记录为 `voice_generation`、`voice.generate`，最终结果类型应为 `file`。
 
 ## 联网搜索
 

@@ -30,6 +30,7 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - `自动化列表`: list this room's automations.
 - `暂停第1个` / `恢复第1个` / `删除第1个`: manage an automation by its position in `自动化列表`.
 - `生成图片 ...` / `画一张 ...` / `出图 ...`: generate an image. The default OpenRouter model is `bytedance-seed/seedream-4.5`.
+- `生成语音：今天也要开心呀` / `朗读：...`: synthesize the requested text with Doubao TTS 2.0 and send the result as an MP3 file.
 - `生成视频 ...` / `做个视频 ...` / `出视频 ...`: generate a short video. The default OpenRouter model is `bytedance/seedance-2.0`. Prompts such as `5s`, `10 秒`, or `五秒` are parsed and passed as the requested duration.
 - Send an image and ask `把这张图动起来`: generate an image-to-video result from that image.
 - `联网搜索 ...` / `帮我查一下 ...`: search the web, then answer with source URLs. Time-sensitive external topics such as weather, news, prices, schedules, and model releases can also trigger search when the wording implies current information. Casual phrases like `今天午饭吃什么` stay as normal chat.
@@ -40,6 +41,7 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - Supported file/media types: `txt`, `md`, `csv`, `xlsx`, `docx`, `pdf`, `png`, `jpg`, `jpeg`, `webp`, `mp4`, `mpeg`, `mpg`, `mov`, `webm`, and `m4v`.
 - Images sent as regular WeChat file attachments are still classified as images by extension, so follow-up requests like `分析刚才的图` or `把这张图动起来` can use them.
 - Attachments are cached locally for a limited time and are scoped by room and user.
+- Voice generation calls Doubao's `seed-tts-2.0` HTTP streaming API with the configured speaker, joins its base64-encoded MP3 chunks, and sends the resulting `.mp3` through the existing WeChat file path.
 
 ## Memory
 
@@ -55,6 +57,7 @@ Manual memories are stored separately from automatic summaries, so explicit `记
 ## Tools, Policy, And Automations
 
 - Built-in tool calls such as web search, file analysis, image/video analysis, and image/video generation are registered in a tool registry and recorded in SQLite.
+- Speech synthesis is registered as `voice.generate`; the generated MP3 uses the normal `file` result kind.
 - `tools.policy.denyTools` can disable specific tools globally, for example `web.search`; `roomToolOverrides` can scope allow/deny rules to a room.
 - High-risk tools, including video generation, require approval when an approver is configured. Adminless mode keeps the earlier no-approval behavior.
 - Automation definitions are parsed by the text LLM into strict JSON, then validated locally. They support one-time reminders, daily schedules, weekly schedules, and fixed intervals. Before 04:00 local time, `第二天` is treated as the same calendar day for late-night scheduling. Due automations are dispatched after the Wechaty adapter starts and reuse the same task queue and tool policy as normal requests.
@@ -76,4 +79,5 @@ pnpm build
 - Search prompts include the current Beijing date/time and add a date anchor for time-sensitive queries, so relative phrases such as “today” and “this week” are interpreted against the current Beijing date.
 - `pnpm audit --prod` is expected to pass. The project pins safe overrides and small local compatibility shims for legacy transitive packages in the Wechaty/FileBox chains; revisit these shims when upstream packages publish maintained replacements.
 - Different Wechaty puppet providers have different reliability and platform constraints. Keep the adapter boundary intact when switching providers.
+- Doubao TTS uses `DOUBAO_TTS_API_KEY`, resource ID `seed-tts-2.0`, and defaults to speaker `zh_male_tiancaitongsheng_uranus_bigtts`. The API key belongs in ignored local configuration or the environment, never in a tracked file.
 - `config/local.yaml`, `data/`, `logs/`, and `*.memory-card.json` are intentionally ignored by git.
