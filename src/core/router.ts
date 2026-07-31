@@ -551,7 +551,9 @@ export class BotRequestRouter {
     const configured =
       this.config.search.provider === 'openrouter'
         ? llmConfigured
-        : Boolean(this.webSearch?.configured());
+        : this.config.search.provider === 'hermes'
+          ? Boolean(this.hermesExecutor?.configured() && this.config.agent.backend === 'hermes')
+          : Boolean(this.webSearch?.configured());
 
     return {
       name: '联网搜索',
@@ -1539,6 +1541,8 @@ export class BotRequestRouter {
       .filter((definition) => {
         if (definition.name !== task.toolName && !definition.canRunAsSupport) return false;
         if (definition.name === 'web.search' && !this.config.search.enabled) return false;
+        if (definition.name === 'web.search' && this.config.search.provider === 'hermes')
+          return false;
         if (definition.name === 'voice.generate' && !this.llm.speechConfigured()) return false;
         const policy = this.evaluateToolPolicy(task, definition);
         return (

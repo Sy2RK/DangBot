@@ -13,6 +13,7 @@ describe('DangBotMcpServer', () => {
   it('requires bearer auth and scopes every call to an opaque task context', async () => {
     const config = await makeTestConfig({
       agent: { mcp: { port: 0 } },
+      search: { enabled: true, provider: 'hermes' },
       auth: { rooms: [{ id: 'room1', enabled: true, admins: ['admin'] }] }
     });
     const db = AppDatabase.memory();
@@ -125,6 +126,16 @@ describe('DangBotMcpServer', () => {
       expect(JSON.stringify(memories)).toContain('allowed room memory');
       expect(JSON.stringify(memories)).not.toContain('foreign memory');
       expect(JSON.stringify(memories)).not.toContain('foreign room memory');
+
+      const capabilities = textPayload(
+        (
+          await client.callTool({
+            name: 'dangbot_capabilities',
+            arguments: { contextId: capability.token }
+          })
+        ).content
+      );
+      expect(JSON.stringify(capabilities)).not.toContain('web.search');
 
       const approvalRequired = await client.callTool({
         name: 'dangbot_execute_tool',

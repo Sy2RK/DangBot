@@ -128,7 +128,11 @@ async function main(): Promise<void> {
       llmConfigured: llm.configured(),
       webSearchConfigured:
         config.search.enabled &&
-        (config.search.provider === 'openrouter' ? llm.configured() : webSearch.configured()),
+        (config.search.provider === 'openrouter'
+          ? llm.configured()
+          : config.search.provider === 'hermes'
+            ? config.agent.backend === 'hermes' && hermesExecutor.configured()
+            : webSearch.configured()),
       soulConfigured: systemPrompt.length > 0
     },
     'starting DangBot'

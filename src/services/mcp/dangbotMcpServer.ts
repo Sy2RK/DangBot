@@ -477,6 +477,9 @@ export class DangBotMcpServer {
     if (toolName === 'web.search' && !this.config.search.enabled) {
       throw new Error('联网搜索未配置。');
     }
+    if (toolName === 'web.search' && this.config.search.provider === 'hermes') {
+      throw new Error('联网搜索由 Hermes 内建工具提供，不经 DangBot MCP。');
+    }
     if (toolName === 'voice.generate' && !this.llm.speechConfigured()) {
       throw new Error('语音合成未配置。');
     }

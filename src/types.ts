@@ -110,16 +110,26 @@ export interface AppConfig {
     };
   };
   llm: {
+    provider: 'openai-compatible' | 'dashscope';
     baseURL: string;
+    nativeBaseURL: string;
     apiKey: string;
     textModel: string;
     visionModel: string;
     imageModel?: string;
     videoModel?: string;
+    videoModels: {
+      textToVideo: string;
+      imageToVideo: string;
+      referenceToVideo: string;
+      videoEdit: string;
+    };
     tts: {
       enabled: boolean;
+      provider: 'doubao' | 'dashscope';
       baseURL: string;
       apiKey: string;
+      model: string;
       resourceId: string;
       voice: string;
       speechRate: number;
@@ -127,7 +137,7 @@ export interface AppConfig {
   };
   search: {
     enabled: boolean;
-    provider: 'openrouter' | 'brave';
+    provider: 'openrouter' | 'brave' | 'hermes';
     braveApiKey: string;
     engine?: 'auto' | 'native' | 'exa' | 'firecrawl' | 'parallel';
     searchContextSize: 'low' | 'medium' | 'high';

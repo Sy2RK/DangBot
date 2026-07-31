@@ -18,6 +18,12 @@ const voiceInput = z.object({
   text: z.string().min(1).max(4096)
 });
 
+const videoGenerationInput = promptInput.extend({
+  mode: z
+    .enum(['auto', 'text-to-video', 'image-to-video', 'reference-to-video', 'video-edit'])
+    .optional()
+});
+
 const textPrepareInput = z.object({
   instruction: z.string().min(1).max(1000),
   source: z.string().min(1).max(20_000),
@@ -135,7 +141,7 @@ function builtinToolDefinitions(): ToolDefinition[] {
     {
       name: 'voice.generate',
       description:
-        '把已经准备好的最终正文合成为 MP3 语音文件。text 必须是实际朗读正文，不能是作品名、任务说明或搜索结果来源。',
+        '把已经准备好的最终正文合成为 WAV 语音文件。text 必须是实际朗读正文，不能是作品名、任务说明或搜索结果来源。',
       inputDescription: '{"text":"最终要朗读的完整正文，不能包含命令、作品名占位、来源或解释"}',
       inputSchema: voiceInput,
       riskLevel: 'medium',
@@ -158,9 +164,10 @@ function builtinToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'video.generate',
-      description: '生成视频或基于图片首帧生成视频。',
-      inputDescription: '{"prompt":"完整的视频生成要求"}',
-      inputSchema: promptInput,
+      description: '按附件类型生成视频：无附件文生视频、单图首帧、多图参考或视频编辑。',
+      inputDescription:
+        '{"prompt":"完整的视频生成要求","mode":"auto|text-to-video|image-to-video|reference-to-video|video-edit（可选）"}',
+      inputSchema: videoGenerationInput,
       riskLevel: 'high',
       allowedRoles: ['member', 'group_admin', 'system_admin'],
       terminalResult: true,
@@ -219,47 +226,121 @@ async function executeVoiceGeneration(
   return {
     kind: 'file' as const,
     filePath: voice.filePath,
-    summary: voice.filePath
+    summary: voice.filePath,
+    metadata: {
+      provider: ctx.config.llm.tts.provider,
+      model:
+        ctx.config.llm.tts.provider === 'dashscope'
+          ? ctx.config.llm.tts.model
+          : ctx.config.llm.tts.resourceId,
+      format: ctx.config.llm.tts.provider === 'dashscope' ? 'wav' : 'mp3'
+    }
   };
 }
 
-async function executeImageGeneration(ctx: ToolExecutionContext, input: z.infer<typeof promptInput>) {
+async function executeImageGeneration(
+  ctx: ToolExecutionContext,
+  input: z.infer<typeof promptInput>
+) {
   const needsReferenceImage = promptReferencesImageForGeneration(input.prompt);
-  const referenceImage = needsReferenceImage ? ctx.pickAttachment('image') : undefined;
-  if (needsReferenceImage && !referenceImage) {
+  const referenceImages = ctx.attachments
+    .filter((attachment) => attachment.kind === 'image')
+    .slice(0, 3);
+  if (needsReferenceImage && referenceImages.length === 0) {
     throw new Error('没有找到可用于生成图片的参考图。请先发送图片，或在同一条消息里带上图片。');
   }
-  await ctx.stage(referenceImage ? '参考图我拿到啦，准备送去画。' : '描述我看明白啦，准备送去画。');
+  await ctx.stage(
+    referenceImages.length > 0 ? '参考图我拿到啦，准备送去画。' : '描述我看明白啦，准备送去画。'
+  );
   const imagePath = await ctx.llm.generateImage(
     input.prompt,
     {
-      referenceImagePath: referenceImage?.filePath,
-      referenceImageMimeType: referenceImage?.mimeType
+      referenceImages: referenceImages.map((reference) => ({
+        filePath: reference.filePath,
+        mimeType: reference.mimeType
+      }))
     },
     ctx.signal
   );
   await ctx.stage('图已经生成好啦，准备发出来。');
-  return { kind: 'image' as const, imagePath, summary: imagePath };
+  return {
+    kind: 'image' as const,
+    imagePath,
+    summary: imagePath,
+    metadata: {
+      provider: ctx.config.llm.provider,
+      model: ctx.config.llm.imageModel,
+      referenceImageCount: referenceImages.length
+    }
+  };
 }
 
-async function executeVideoGeneration(ctx: ToolExecutionContext, input: z.infer<typeof promptInput>) {
-  const referenceImage = ctx.pickAttachment('image');
-  if (promptNeedsReferenceImage(input.prompt) && !referenceImage) {
+async function executeVideoGeneration(
+  ctx: ToolExecutionContext,
+  input: z.infer<typeof videoGenerationInput>
+) {
+  const referenceImages = ctx.attachments
+    .filter((attachment) => attachment.kind === 'image')
+    .slice(0, 9);
+  const sourceVideo = ctx.attachments.find((attachment) => attachment.kind === 'video');
+  if (promptNeedsReferenceImage(input.prompt) && referenceImages.length === 0) {
     throw new Error('没有找到可用于生成视频的参考图。请先发送图片，或在同一条消息里带上图片。');
   }
-  await ctx.stage(referenceImage ? '首帧参考图找到了，准备送去做视频。' : '视频描述我看明白啦，准备提交生成。');
+  if (input.mode === 'video-edit' && !sourceVideo) {
+    throw new Error('视频编辑需要先发送一个源视频。');
+  }
+  const routeLabel = sourceVideo
+    ? '源视频和参考图已隔离装载，准备提交视频编辑。'
+    : referenceImages.length >= 2
+      ? '多张参考图找到了，准备提交参考生视频。'
+      : referenceImages.length === 1
+        ? '首帧参考图找到了，准备送去做视频。'
+        : '视频描述我看明白啦，准备提交生成。';
+  await ctx.stage(routeLabel);
   const videoPath = await ctx.llm.generateVideo(
     input.prompt,
     {
-      frameImagePath: referenceImage?.filePath,
-      frameImageMimeType: referenceImage?.mimeType,
+      mode: input.mode,
+      frameImagePath: referenceImages[0]?.filePath,
+      frameImageMimeType: referenceImages[0]?.mimeType,
+      referenceImages: referenceImages.map((reference) => ({
+        filePath: reference.filePath,
+        mimeType: reference.mimeType
+      })),
+      sourceVideo: sourceVideo
+        ? { filePath: sourceVideo.filePath, mimeType: sourceVideo.mimeType }
+        : undefined,
       timeoutMs: ctx.config.limits.videoGenerationTimeoutMs,
       pollIntervalMs: ctx.config.limits.videoGenerationPollIntervalMs
     },
     ctx.signal
   );
   await ctx.stage('视频已经生成好啦，准备发文件。');
-  return { kind: 'file' as const, filePath: videoPath, summary: videoPath };
+  const route =
+    input.mode && input.mode !== 'auto'
+      ? input.mode
+      : sourceVideo
+        ? 'video-edit'
+        : referenceImages.length >= 2
+          ? 'reference-to-video'
+          : referenceImages.length === 1
+            ? 'image-to-video'
+            : 'text-to-video';
+  const videoModel =
+    ctx.config.llm.provider === 'dashscope'
+      ? {
+          'text-to-video': ctx.config.llm.videoModels.textToVideo,
+          'image-to-video': ctx.config.llm.videoModels.imageToVideo,
+          'reference-to-video': ctx.config.llm.videoModels.referenceToVideo,
+          'video-edit': ctx.config.llm.videoModels.videoEdit
+        }[route]
+      : ctx.config.llm.videoModel;
+  return {
+    kind: 'file' as const,
+    filePath: videoPath,
+    summary: videoPath,
+    metadata: { provider: ctx.config.llm.provider, model: videoModel, route }
+  };
 }
 
 async function executeImageAnalysis(ctx: ToolExecutionContext, input: z.infer<typeof promptInput>) {
@@ -268,9 +349,20 @@ async function executeImageAnalysis(ctx: ToolExecutionContext, input: z.infer<ty
     throw new Error('没有找到可分析的图片。请先发送图片，或在同一条消息里 @ 我说明要分析什么。');
   }
   await ctx.stage('图片我拿到啦，正在看细节。');
-  const text = await ctx.llm.vision(input.prompt, attachment.filePath, attachment.mimeType, ctx.signal, ctx.system.content);
+  const text = await ctx.llm.vision(
+    input.prompt,
+    attachment.filePath,
+    attachment.mimeType,
+    ctx.signal,
+    ctx.system.content
+  );
   await ctx.stage('图里的信息已经捋好啦。');
-  return { kind: 'text' as const, text, summary: text };
+  return {
+    kind: 'text' as const,
+    text,
+    summary: text,
+    metadata: { provider: ctx.config.llm.provider, model: ctx.config.llm.visionModel }
+  };
 }
 
 async function executeVideoAnalysis(ctx: ToolExecutionContext, input: z.infer<typeof promptInput>) {
@@ -279,9 +371,20 @@ async function executeVideoAnalysis(ctx: ToolExecutionContext, input: z.infer<ty
     throw new Error('没有找到可分析的视频。请先发送视频，或在同一条消息里 @ 我说明要分析什么。');
   }
   await ctx.stage('视频我拿到啦，正在看里面的内容。');
-  const text = await ctx.llm.video(input.prompt, attachment.filePath, attachment.mimeType, ctx.signal, ctx.system.content);
+  const text = await ctx.llm.video(
+    input.prompt,
+    attachment.filePath,
+    attachment.mimeType,
+    ctx.signal,
+    ctx.system.content
+  );
   await ctx.stage('视频里的重点已经捋好啦。');
-  return { kind: 'text' as const, text, summary: text };
+  return {
+    kind: 'text' as const,
+    text,
+    summary: text,
+    metadata: { provider: ctx.config.llm.provider, model: ctx.config.llm.visionModel }
+  };
 }
 
 async function executeFileAnalysis(ctx: ToolExecutionContext, input: z.infer<typeof promptInput>) {
@@ -427,11 +530,18 @@ async function executeWebSearch(
       { temperature: 0.25 }
     );
     await ctx.stage('回答和来源都整理好啦。');
-    return { kind: 'text' as const, text: appendPlainSources(text, searchResponse.results), summary: text };
+    return {
+      kind: 'text' as const,
+      text: appendPlainSources(text, searchResponse.results),
+      summary: text
+    };
   }
 
   if (!ctx.config.search.enabled) {
     throw new Error('联网搜索尚未启用。请在配置中开启 search.enabled。');
+  }
+  if (ctx.config.search.provider === 'hermes') {
+    throw new Error('联网搜索由专用 Hermes 内建 web/browser 工具执行，不通过 DangBot MCP 转发。');
   }
 
   const answer = await ctx.llm.chatWithWebSearch(
@@ -456,7 +566,11 @@ async function executeWebSearch(
     ctx.signal
   );
   await ctx.stage('联网回答和来源都整理好啦。');
-  return { kind: 'text' as const, text: appendPlainSources(answer.text, answer.sources as WebSearchResult[]), summary: answer.text };
+  return {
+    kind: 'text' as const,
+    text: appendPlainSources(answer.text, answer.sources as WebSearchResult[]),
+    summary: answer.text
+  };
 }
 
 export function buildWebSearchQuery(prompt: string): string {
@@ -511,11 +625,7 @@ export function isUnresolvedSpeechReference(text: string): boolean {
   return /^(?:一下)?\s*《[^》]{1,80}》$/.test(normalized);
 }
 
-export function extractBoundedText(
-  source: string,
-  startMarker: string,
-  endMarker: string
-): string {
+export function extractBoundedText(source: string, startMarker: string, endMarker: string): string {
   const start = locateFlexibleMarker(source, startMarker, 0);
   if (!start) {
     throw new Error(`原始材料中没有找到正文开头：${startMarker}`);
@@ -566,13 +676,19 @@ function compactBoundaryText(text: string): string {
 }
 
 function needsTemporalSearchAnchor(query: string): boolean {
-  return /(今天|今日|今年|本年|本年度|明年|去年|明天|昨天|昨日|本周|这周|本月|最近|当前|现在|实时|最新|天气|预报|新闻|价格|汇率|赛程|股价|政策|公告|发布|上线|更新)/i.test(query);
+  return /(今天|今日|今年|本年|本年度|明年|去年|明天|昨天|昨日|本周|这周|本月|最近|当前|现在|实时|最新|天气|预报|新闻|价格|汇率|赛程|股价|政策|公告|发布|上线|更新)/i.test(
+    query
+  );
 }
 
 function promptNeedsReferenceImage(prompt: string): boolean {
-  return /(这张图|这张图片|这张照片|这个图|刚才的图|刚才图片|刚才照片|上一张|上张|参考图|原图|图生视频|image[- ]?to[- ]?video|把.+动起来|让.+动起来|使.+动起来|让(?:它|他|她).*(?:跳|舞|走|跑|转|眨眼|挥手|说话|唱歌|表演|摇摆|飞)|把(?:它|他|她).*(?:跳|舞|走|跑|转|眨眼|挥手|说话|唱歌|表演|摇摆|飞)|animate)/i.test(prompt);
+  return /(这张图|这张图片|这张照片|这个图|刚才的图|刚才图片|刚才照片|上一张|上张|参考图|原图|图生视频|image[- ]?to[- ]?video|把.+动起来|让.+动起来|使.+动起来|让(?:它|他|她).*(?:跳|舞|走|跑|转|眨眼|挥手|说话|唱歌|表演|摇摆|飞)|把(?:它|他|她).*(?:跳|舞|走|跑|转|眨眼|挥手|说话|唱歌|表演|摇摆|飞)|animate)/i.test(
+    prompt
+  );
 }
 
 function promptReferencesImageForGeneration(prompt: string): boolean {
-  return /(这张图|这张图片|这张照片|这个图|这个图片|上一张|上张|前一张|刚才的图|刚才图片|刚才的照片|刚刚的图|参考图|参考图片|原图|照片中|图片中|图里|照片里|按照这张|参考这张|基于这张|用这张|把它|把他|把她|让它|让他|让她)/i.test(prompt);
+  return /(这张图|这张图片|这张照片|这个图|这个图片|上一张|上张|前一张|刚才的图|刚才图片|刚才的照片|刚刚的图|参考图|参考图片|原图|照片中|图片中|图里|照片里|按照这张|参考这张|基于这张|用这张|把它|把他|把她|让它|让他|让她)/i.test(
+    prompt
+  );
 }

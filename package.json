@@ -18,7 +18,7 @@
     "hermes:install:launchd": "node scripts/hermes/install-launchd.mjs",
     "hermes:preflight:offline": "tsx scripts/hermes/offline-preflight.ts",
     "hermes:preflight:live": "tsx scripts/hermes/live-preflight.ts",
-    "verify:voice-agent": "tsx scripts/verify-multistep-voice.ts",
+    "dashscope:preflight": "tsx scripts/dashscope/live-preflight.ts",
     "lint": "eslint src tests scripts",
     "format": "prettier --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit"

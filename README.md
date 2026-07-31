@@ -33,7 +33,9 @@ pnpm hermes:bootstrap:browser-download
 pnpm hermes:run
 ```
 
-Set `DANGBOT_MCP_API_KEY` while DangBot is still on `legacy` to start MCP for offline verification. Only after both health checks and simulated events pass, set `DANGBOT_HERMES_API_KEY`, `DANGBOT_HERMES_SESSION_SECRET`, and `DANGBOT_AGENT_BACKEND=hermes`, then restart DangBot. DeepSeek `deepseek-v4-flash` is always the planner in this mode; Qwen `qwen/qwen3.7-plus` remains the file/image/video understanding model behind DangBot MCP.
+Run `pnpm hermes:configure -- --backend legacy` and enter the dedicated DeepSeek and DashScope keys through the no-echo prompts. Set `DANGBOT_MCP_API_KEY` while DangBot is still on `legacy` to start MCP for offline verification. Only after both health checks and simulated events pass, set `DANGBOT_HERMES_API_KEY`, `DANGBOT_HERMES_SESSION_SECRET`, and `DANGBOT_AGENT_BACKEND=hermes`, then restart DangBot. DeepSeek `deepseek-v4-flash` is always the planner; DashScope `qwen3.7-flash` handles text and multimodal understanding, while media generation stays behind DangBot MCP and the artifact broker.
+
+Hermes 0.19.0 has a native DashScope chat provider but no built-in DashScope image, HappyHorse video, or Qwen Audio TTS plugin. DangBot therefore keeps Hermes-native web/browser tools and exposes the DashScope media calls through its loopback MCP. This preserves per-task attachment authorization, cancellation, artifact IDs, and verified WeChat delivery without enabling host file access.
 
 There is no container runtime dependency. Safe code execution is pure JavaScript in a bounded QuickJS-WASM runtime with no shell, host filesystem, `process`, `require`, or network API. Browser automation uses the dedicated Hermes browser installation and an ephemeral, logged-out session; it never uses the user's Chrome profile or cookies. See [the Hermes operations runbook](docs/hermes-backend.md) for validation, launchd, cutover, and rollback.
 
@@ -52,10 +54,10 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - `定时 每天 09:00 总结群聊` / `设置定时任务 每天 09:00 总结群聊` / `自动化 每30分钟 联网搜索 Qwen 最新消息`: create a recurring scheduled agent request.
 - `自动化列表`: list this room's automations.
 - `暂停第1个` / `恢复第1个` / `删除第1个`: manage an automation by its position in `自动化列表`.
-- `生成图片 ...` / `画一张 ...` / `出图 ...`: generate an image. The default OpenRouter model is `bytedance-seed/seedream-4.5`.
-- `生成语音：今天也要开心呀` / `朗读：...`: synthesize the requested text with Doubao TTS 2.0 and send the result as an MP3 file. Named works can trigger multiple steps: retrieve the text, extract its exact body, then synthesize only that body.
-- `生成视频 ...` / `做个视频 ...` / `出视频 ...`: generate a short video. The default OpenRouter model is `bytedance/seedance-2.0`. Prompts such as `5s`, `10 秒`, or `五秒` are parsed and passed as the requested duration.
-- Send an image and ask `把这张图动起来`: generate an image-to-video result from that image.
+- `生成图片 ...` / `画一张 ...` / `出图 ...`: use DashScope `qwen-image-3.0-pro`; 1–3 attached images become ordered editing references.
+- `生成语音：今天也要开心呀` / `朗读：...`: use `qwen-audio-3.0-tts-flash` and send a WAV file. Named works can trigger multiple steps: retrieve the text, extract its exact body, then synthesize only that body.
+- `生成视频 ...` / `做个视频 ...` / `出视频 ...`: use HappyHorse. No attachment routes to `happyhorse-1.1-t2v`, one image to `happyhorse-1.1-i2v`, multiple images to `happyhorse-1.1-r2v`, and a source video to `happyhorse-1.0-video-edit`.
+- Send an image and ask `把这张图动起来`: use that image as the first frame. Multiple images become ordered references; a source video plus up to five images becomes a video-edit request.
 - `联网搜索 ...` / `帮我查一下 ...`: search the web, then answer with source URLs. Time-sensitive external topics such as weather, news, prices, schedules, and model releases can also trigger search when the wording implies current information. Casual phrases like `今天午饭吃什么` stay as normal chat.
 - Any other mentioned text is handled as a normal agent request.
 
@@ -66,7 +68,7 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - Attachments are cached locally for a limited time and are scoped by room and user.
 - Follow-up requests can bind to the sender's recent valid file. Attachment-backed rewrite and translation tasks read the file instead of treating the request as plain chat.
 - Edited `docx`, `txt`, and `md` files are uploaded back in the same file type. Generated DOCX files preserve editable text and paragraph breaks, but complex source styling and embedded objects are not guaranteed to survive.
-- Voice generation calls Doubao's `seed-tts-2.0` HTTP streaming API with the configured speaker, joins its base64-encoded MP3 chunks, and sends the resulting `.mp3` through the existing WeChat file path.
+- Voice generation calls DashScope Qwen Audio TTS over HTTPS, immediately downloads the signed result, validates the WAV signature, and sends the resulting `.wav` through the existing WeChat file path.
 
 ## Memory
 
@@ -87,7 +89,7 @@ Manual memories are stored separately from automatic summaries, so explicit `记
 - MCP capabilities are random, task-scoped, short-lived, and revoked on completion or cancellation. Tool responses expose only status, a bounded summary, logical artifact IDs, and sanitized data; they never expose host paths.
 - Generated files are realpath-, MIME-, size-, and SHA-256-checked by the artifact broker before Wechaty sends a real attachment.
 - `text.prepare` supports deterministic start/end markers so later tools receive only the intended text instead of titles, instructions, citations, or adjacent content.
-- Speech synthesis is registered as `voice.generate`; the generated MP3 uses the normal `file` result kind.
+- Speech synthesis is registered as `voice.generate`; the generated WAV uses the normal `file` result kind.
 - Whether a request should invoke speech synthesis is decided by the main LLM intent classifier. Local text matching only strips explicit command wording and blocks narrow unresolved-title placeholders; it does not classify general sentences by suffix.
 - `tools.policy.denyTools` can disable specific tools globally, for example `web.search`; `roomToolOverrides` can scope allow/deny rules to a room.
 - High-risk tools, including video generation, require approval when an approver is configured. Adminless mode keeps the earlier no-approval behavior.
@@ -102,20 +104,20 @@ pnpm test
 pnpm build
 pnpm audit --prod
 git diff --check
-pnpm verify:voice-agent
+pnpm dashscope:preflight
 ```
 
-`pnpm verify:voice-agent` is an opt-in live integration check. It uses the configured main model, web search, and Doubao TTS without sending anything to WeChat.
+`pnpm dashscope:preflight` makes low-cost text, image-understanding, and TTS calls without connecting to WeChat. Add `-- --image`, `-- --video`, or `-- --paid-media` only when an operator intentionally wants real Qwen Image, HappyHorse, or both generation checks, because those calls create billable media tasks. The video option also feeds the generated MP4 back to `qwen3.7-flash` to verify video understanding.
 
 ## Important notes
 
 - This MVP does not add friends, create rooms, invite members, or automatically join rooms.
-- Video generation is asynchronous and may take several minutes. DangBot polls OpenRouter and returns the generated `.mp4` as a file when it is ready.
-- Web search uses OpenRouter's web search tool by default when `search.enabled` is true. Brave Search remains available with `search.provider: brave` and `search.braveApiKey`.
+- Video generation is asynchronous and may take several minutes. DangBot polls DashScope, attempts cancellation after timeout or abort, validates the downloaded MP4, and returns it as a real file.
+- In Hermes mode, web search uses the dedicated Hermes native web/browser tools. Brave Search remains available for legacy mode with `search.provider: brave`; `search.provider: hermes` is deliberately not re-exposed through DangBot MCP.
 - Search prompts include the current Beijing date/time and add a date anchor for time-sensitive queries, so relative phrases such as “today” and “this week” are interpreted against the current Beijing date.
 - `pnpm audit --prod` is expected to pass. The project pins safe overrides and small local compatibility shims for legacy transitive packages in the Wechaty/FileBox chains; revisit these shims when upstream packages publish maintained replacements.
 - Different Wechaty puppet providers have different reliability and platform constraints. Keep the adapter boundary intact when switching providers.
 - Hermes mode never enables host terminal, host file editing, Computer Use, plugin/skill installation, Home Assistant, or arbitrary message sending. Administrators can approve a high-risk operation once or deny it; there is no permanent authorization.
 - `AutomationScheduler` stays in Node and dispatches due work through the selected backend so asynchronous results can still be delivered to the correct WeChat room.
-- Doubao TTS uses `DOUBAO_TTS_API_KEY`, resource ID `seed-tts-2.0`, and defaults to speaker `zh_male_tiancaitongsheng_uranus_bigtts`. The API key belongs in ignored local configuration or the environment, never in a tracked file.
+- DashScope uses `DASHSCOPE_API_KEY` or ignored local configuration. Qwen Audio TTS non-real-time HTTP calls require a China (Beijing) key; Qwen Image 3.0 Pro also requires model access. Keys never belong in tracked files.
 - `config/local.yaml`, `data/`, `logs/`, and `*.memory-card.json` are intentionally ignored by git.

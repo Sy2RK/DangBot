@@ -133,25 +133,44 @@ const configSchema = z.object({
       }
     }),
   llm: z.object({
+    provider: z.enum(['openai-compatible', 'dashscope']).default('openai-compatible'),
     baseURL: z.string().url().default('https://api.openai.com/v1'),
+    nativeBaseURL: z.string().url().default('https://dashscope.aliyuncs.com/api/v1'),
     apiKey: z.string().default(''),
     textModel: z.string().default('gpt-4.1-mini'),
     visionModel: z.string().default('gpt-4.1-mini'),
     imageModel: z.string().optional(),
     videoModel: z.string().optional(),
+    videoModels: z
+      .object({
+        textToVideo: z.string().min(1).default('happyhorse-1.1-t2v'),
+        imageToVideo: z.string().min(1).default('happyhorse-1.1-i2v'),
+        referenceToVideo: z.string().min(1).default('happyhorse-1.1-r2v'),
+        videoEdit: z.string().min(1).default('happyhorse-1.0-video-edit')
+      })
+      .default({
+        textToVideo: 'happyhorse-1.1-t2v',
+        imageToVideo: 'happyhorse-1.1-i2v',
+        referenceToVideo: 'happyhorse-1.1-r2v',
+        videoEdit: 'happyhorse-1.0-video-edit'
+      }),
     tts: z
       .object({
         enabled: booleanishSchema.default(false),
+        provider: z.enum(['doubao', 'dashscope']).default('doubao'),
         baseURL: z.string().url().default('https://openspeech.bytedance.com/api/v3'),
         apiKey: z.string().default(''),
+        model: z.string().min(1).default('qwen-audio-3.0-tts-flash'),
         resourceId: z.string().min(1).default('seed-tts-2.0'),
         voice: z.string().min(1).default('zh_male_tiancaitongsheng_uranus_bigtts'),
         speechRate: z.number().int().min(-50).max(100).default(0)
       })
       .default({
         enabled: false,
+        provider: 'doubao',
         baseURL: 'https://openspeech.bytedance.com/api/v3',
         apiKey: '',
+        model: 'qwen-audio-3.0-tts-flash',
         resourceId: 'seed-tts-2.0',
         voice: 'zh_male_tiancaitongsheng_uranus_bigtts',
         speechRate: 0
@@ -160,7 +179,7 @@ const configSchema = z.object({
   search: z
     .object({
       enabled: booleanishSchema.default(false),
-      provider: z.enum(['openrouter', 'brave']).default('openrouter'),
+      provider: z.enum(['openrouter', 'brave', 'hermes']).default('openrouter'),
       braveApiKey: z.string().default(''),
       engine: optionalSearchEngineSchema,
       searchContextSize: z.enum(['low', 'medium', 'high']).default('medium'),

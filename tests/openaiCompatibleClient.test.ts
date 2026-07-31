@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   OpenAICompatibleClient,
   parseVideoDurationSeconds
@@ -54,6 +55,46 @@ describe('OpenAICompatibleClient video generation', () => {
       model: config.llm.videoModel,
       duration: 5,
       resolution: '720p'
+    });
+  });
+
+  it('keeps the first reference image when the legacy OpenAI-compatible backend is selected', async () => {
+    const config = await makeTestConfig({ llm: { apiKey: 'test-key' } });
+    const referencePath = path.join(config.storage.outputsDir, 'reference.png');
+    await mkdir(config.storage.outputsDir, { recursive: true });
+    await writeFile(referencePath, Buffer.from('reference'));
+    let submittedBody: Record<string, unknown> | undefined;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        submittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  images: [{ image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }]
+                }
+              }
+            ]
+          }),
+          { status: 200 }
+        );
+      })
+    );
+
+    const client = new OpenAICompatibleClient(config.llm, config.storage.outputsDir);
+    await client.generateImage('改成水彩', {
+      referenceImages: [{ filePath: referencePath, mimeType: 'image/png' }]
+    });
+
+    const content = (
+      submittedBody?.messages as Array<{ content?: Array<Record<string, unknown>> }>
+    )?.[0]?.content;
+    expect(content?.[1]).toMatchObject({
+      type: 'image_url',
+      image_url: { url: expect.stringContaining('data:image/png;base64,') }
     });
   });
 

@@ -58,16 +58,26 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       }
     },
     llm: {
+      provider: 'openai-compatible',
       baseURL: 'https://example.test/v1',
+      nativeBaseURL: 'https://dashscope.aliyuncs.com/api/v1',
       apiKey: '',
       textModel: 'test-text',
       visionModel: 'test-vision',
       imageModel: 'test-image',
       videoModel: 'test-video',
+      videoModels: {
+        textToVideo: 'happyhorse-1.1-t2v',
+        imageToVideo: 'happyhorse-1.1-i2v',
+        referenceToVideo: 'happyhorse-1.1-r2v',
+        videoEdit: 'happyhorse-1.0-video-edit'
+      },
       tts: {
         enabled: false,
+        provider: 'doubao',
         baseURL: 'https://openspeech.bytedance.com/api/v3',
         apiKey: '',
+        model: 'qwen-audio-3.0-tts-flash',
         resourceId: 'seed-tts-2.0',
         voice: 'zh_male_tiancaitongsheng_uranus_bigtts',
         speechRate: 0
@@ -160,6 +170,7 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
     llm: {
       ...base.llm,
       ...overrides.llm,
+      videoModels: { ...base.llm.videoModels, ...overrides.llm?.videoModels },
       tts: { ...base.llm.tts, ...overrides.llm?.tts }
     },
     search: { ...base.search, ...overrides.search },

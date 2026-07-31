@@ -22,23 +22,30 @@ agent:
     # Portable QuickJS-WASM only. Never falls back to the host shell.
     enabled: true
 llm:
-  baseURL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
-  apiKey: ${OPENAI_API_KEY:-}
-  textModel: ${OPENAI_TEXT_MODEL:-qwen/qwen3.7-plus}
-  visionModel: ${OPENAI_VISION_MODEL:-qwen/qwen3.7-plus}
-  imageModel: ${OPENAI_IMAGE_MODEL:-bytedance-seed/seedream-4.5}
-  videoModel: ${OPENAI_VIDEO_MODEL:-bytedance/seedance-2.0}
+  provider: ${LLM_PROVIDER:-dashscope}
+  baseURL: ${DASHSCOPE_COMPATIBLE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+  nativeBaseURL: ${DASHSCOPE_NATIVE_BASE_URL:-https://dashscope.aliyuncs.com/api/v1}
+  apiKey: ${DASHSCOPE_API_KEY:-}
+  textModel: ${DASHSCOPE_TEXT_MODEL:-qwen3.7-flash}
+  visionModel: ${DASHSCOPE_VISION_MODEL:-qwen3.7-flash}
+  imageModel: ${DASHSCOPE_IMAGE_MODEL:-qwen-image-3.0-pro}
+  videoModels:
+    textToVideo: ${DASHSCOPE_T2V_MODEL:-happyhorse-1.1-t2v}
+    imageToVideo: ${DASHSCOPE_I2V_MODEL:-happyhorse-1.1-i2v}
+    referenceToVideo: ${DASHSCOPE_R2V_MODEL:-happyhorse-1.1-r2v}
+    videoEdit: ${DASHSCOPE_VIDEO_EDIT_MODEL:-happyhorse-1.0-video-edit}
   tts:
-    enabled: ${DOUBAO_TTS_ENABLED:-false}
-    baseURL: ${DOUBAO_TTS_BASE_URL:-https://openspeech.bytedance.com/api/v3}
-    apiKey: ${DOUBAO_TTS_API_KEY:-}
-    resourceId: ${DOUBAO_TTS_RESOURCE_ID:-seed-tts-2.0}
-    voice: ${DOUBAO_TTS_VOICE:-zh_male_tiancaitongsheng_uranus_bigtts}
-    # -50 is 0.5x; 0 is normal; 100 is 2x.
+    enabled: ${DASHSCOPE_TTS_ENABLED:-true}
+    provider: ${TTS_PROVIDER:-dashscope}
+    baseURL: ${DASHSCOPE_NATIVE_BASE_URL:-https://dashscope.aliyuncs.com/api/v1}
+    apiKey: ${DASHSCOPE_TTS_API_KEY:-}
+    model: ${DASHSCOPE_TTS_MODEL:-qwen-audio-3.0-tts-flash}
+    resourceId: seed-tts-2.0
+    voice: ${DASHSCOPE_TTS_VOICE:-longanhuan_v3.6}
     speechRate: 0
 search:
-  enabled: ${WEB_SEARCH_ENABLED:-false}
-  provider: ${WEB_SEARCH_PROVIDER:-openrouter}
+  enabled: ${WEB_SEARCH_ENABLED:-true}
+  provider: ${WEB_SEARCH_PROVIDER:-hermes}
   braveApiKey: ${BRAVE_SEARCH_API_KEY:-}
   engine: ${OPENROUTER_WEB_SEARCH_ENGINE:-}
   searchContextSize: medium

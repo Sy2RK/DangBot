@@ -14,18 +14,31 @@ const serviceEnvPath = path.join(runtimeRoot, 'service.env');
 const localConfigPath = path.join(projectRoot, 'config', 'local.yaml');
 const backend = readBackend(process.argv);
 
-const deepseekApiKey = (
-  process.env.DANGBOT_DEEPSEEK_API_KEY?.trim() || (await readSecret('DangBot DeepSeek API key: '))
-).trim();
-if (deepseekApiKey.length < 16 || /[\r\n]/u.test(deepseekApiKey)) {
-  throw new Error('DeepSeek API key is missing or invalid.');
-}
-
 await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
 await mkdir(backupRoot, { recursive: true, mode: 0o700 });
 
 const existingServiceEnv = await readEnvIfExists(serviceEnvPath);
 const localConfig = await readYamlIfExists(localConfigPath);
+const deepseekApiKey = (
+  process.env.DANGBOT_DEEPSEEK_API_KEY?.trim() ||
+  existingServiceEnv.DEEPSEEK_API_KEY?.trim() ||
+  (await readSecret('DangBot DeepSeek API key: '))
+).trim();
+if (deepseekApiKey.length < 16 || /[\r\n]/u.test(deepseekApiKey)) {
+  throw new Error('DeepSeek API key is missing or invalid.');
+}
+
+const existingDashScopeKey =
+  localConfig.llm?.provider === 'dashscope' ? localConfig.llm?.apiKey?.trim() : '';
+const dashScopeApiKey = (
+  process.env.DANGBOT_DASHSCOPE_API_KEY?.trim() ||
+  existingDashScopeKey ||
+  (await readSecret('DangBot DashScope API key: '))
+).trim();
+if (dashScopeApiKey.length < 16 || /[\r\n]/u.test(dashScopeApiKey)) {
+  throw new Error('DashScope API key is missing or invalid.');
+}
+
 const apiServerKey = keepOrGenerate(existingServiceEnv.API_SERVER_KEY, 32);
 const mcpApiKey = keepOrGenerate(existingServiceEnv.DANGBOT_MCP_API_KEY, 32);
 const sessionSecret = keepOrGenerate(localConfig.agent?.hermes?.sessionSecret, 32);
@@ -66,6 +79,37 @@ localConfig.agent = {
     apiKey: mcpApiKey
   }
 };
+localConfig.llm = {
+  ...(localConfig.llm ?? {}),
+  provider: 'dashscope',
+  baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  nativeBaseURL: 'https://dashscope.aliyuncs.com/api/v1',
+  apiKey: dashScopeApiKey,
+  textModel: 'qwen3.7-flash',
+  visionModel: 'qwen3.7-flash',
+  imageModel: 'qwen-image-3.0-pro',
+  videoModels: {
+    textToVideo: 'happyhorse-1.1-t2v',
+    imageToVideo: 'happyhorse-1.1-i2v',
+    referenceToVideo: 'happyhorse-1.1-r2v',
+    videoEdit: 'happyhorse-1.0-video-edit'
+  },
+  tts: {
+    ...(localConfig.llm?.tts ?? {}),
+    enabled: true,
+    provider: 'dashscope',
+    baseURL: 'https://dashscope.aliyuncs.com/api/v1',
+    apiKey: '',
+    model: 'qwen-audio-3.0-tts-flash',
+    voice: 'longanhuan_v3.6',
+    speechRate: 0
+  }
+};
+localConfig.search = {
+  ...(localConfig.search ?? {}),
+  enabled: true,
+  provider: 'hermes'
+};
 await writeOwnerOnly(localConfigPath, YAML.stringify(localConfig));
 
 process.stdout.write(
@@ -73,7 +117,8 @@ process.stdout.write(
     'Configured the isolated DangBot Hermes runtime.',
     `Backend: ${backend}`,
     'Planner model: deepseek-v4-flash',
-    'Qwen/OpenRouter configuration: preserved',
+    'DashScope models: qwen3.7-flash, qwen-audio-3.0-tts-flash, qwen-image-3.0-pro, HappyHorse',
+    'Web search: dedicated Hermes built-in web/browser tools',
     'Credential values: not printed',
     ''
   ].join('\n')

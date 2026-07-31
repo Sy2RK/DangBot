@@ -4,8 +4,8 @@
 
 1. 复制 `config/local.yaml.example` 为 `config/local.yaml`。
 2. 填入机器人名称和授权群 `room id`。如确需按群名首次绑定，显式设置 `auth.allowTopicRoomBinding: true`，并确认群名没有重名。默认可以不配置管理员，机器人会以无管理员模式运行。
-3. 配置 `OPENAI_API_KEY`，或在 `config/local.yaml` 中填写 OpenAI-compatible `llm.apiKey`、`baseURL` 和模型名。
-4. 如需语音文件，启用豆包 `llm.tts`；资源 ID 使用 `seed-tts-2.0`，音色使用 `zh_male_tiancaitongsheng_uranus_bigtts`。
+3. 运行 `pnpm hermes:configure -- --backend legacy`，通过无回显提示写入专用 DeepSeek 和中国（北京）地域 DashScope key；不得把 key 写进版本库。
+4. 确认 `llm.provider: dashscope`，理解模型为 `qwen3.7-flash`，TTS 为 `qwen-audio-3.0-tts-flash`，默认音色为 `longanhuan_v3.6`。
 5. 运行 `pnpm install`。如果 pnpm 提示忽略构建脚本，确认 `package.json` 的 `pnpm.onlyBuiltDependencies` 后重新安装。
 6. 验收 Hermes 模式时，先按 `docs/hermes-backend.md` 完成隔离运行时、MCP 和模拟事件验证；不得先连接真实群试错。
 
@@ -21,7 +21,7 @@
 8. 浏览器必须使用专属安装和临时未登录会话，不得读取用户 Chrome 配置、Cookie 或当前 Hermes 浏览器状态。
 9. Hermes 工具列表不得包含 terminal、宿主机文件读写/补丁、Computer Use、插件或技能安装、Home Assistant、消息代发和全局记忆。
 10. SSE 中断后应轮询恢复状态；等待审批时管理员只能选择本次同意或拒绝，取消时应调用 Hermes `/stop` 并撤销 MCP 权限。
-11. DeepSeek `deepseek-v4-flash` 必须是每次 run 的规划模型；图片和视频分析的工具调用记录必须显示 `qwen/qwen3.7-plus`。
+11. DeepSeek `deepseek-v4-flash` 必须是每次 run 的规划模型；图片和视频分析的工具调用记录必须显示 DashScope `qwen3.7-flash`。
 
 ## 基础验收
 
@@ -38,23 +38,25 @@
 2. 用户发送图片，再发送 `@DangBot 分析刚才的图`，机器人应调用视觉模型。
 3. 用户把 `.png/.jpg/.jpeg/.webp` 作为普通文件发送，再发送 `@DangBot 分析刚才的图`，机器人仍应把它当作图片处理。
 4. 用户发送视频，再发送 `@DangBot 分析刚才的视频`，机器人应调用多模态模型。
-5. 发送 `@DangBot 生成图片：一只胖猫趴在窗台晒太阳`，机器人应调用 `bytedance-seed/seedream-4.5` 并回传图片。
-6. 发送 `@DangBot 生成视频：一只胖猫慢慢伸懒腰，阳光照在地板上，5s`，机器人应调用 `bytedance/seedance-2.0`，把 5 秒作为请求时长，并回传 `.mp4` 文件。
-7. 用户发送图片，再发送 `@DangBot 把这张图动起来`，机器人应使用最近图片作为首帧生成视频。
-8. 上传超过限制或不支持的文件类型，机器人应返回明确错误。
-9. 长结果应以 `.txt` 纯文本文件回传，群聊提示和文件内容都不应包含 Markdown 格式。
+5. 发送 `@DangBot 生成图片：一只胖猫趴在窗台晒太阳`，机器人应调用 `qwen-image-3.0-pro` 并回传 PNG；账号未获限量开放资格时应返回明确供应商错误。
+6. 带 1～3 张图片请求改图，Qwen Image 请求中的参考图数量和顺序应与当前任务授权附件一致，不得带入其他任务附件。
+7. 发送 `@DangBot 生成视频：一只胖猫慢慢伸懒腰，阳光照在地板上，5s`，机器人应调用 `happyhorse-1.1-t2v`，把 5 秒作为请求时长，并回传 `.mp4` 文件。
+8. 用户发送一张图片再请求“把这张图动起来”，应路由 `happyhorse-1.1-i2v`；发送多张图应路由 `happyhorse-1.1-r2v`；发送源视频与可选参考图应路由 `happyhorse-1.0-video-edit`。
+9. 视频编辑上传地址必须是 HTTPS `*.aliyuncs.com`，临时对象名不得暴露宿主机路径；取消或超时后应尝试调用 DashScope task cancel。
+10. 上传超过限制或不支持的文件类型，机器人应返回明确错误。
+11. 长结果应以 `.txt` 纯文本文件回传，群聊提示和文件内容都不应包含 Markdown 格式。
 
 ## 语音文件
 
 1. 发送 `@DangBot 生成语音：今天也要开心呀`，机器人应只合成“今天也要开心呀”。
-2. 请求应调用豆包 `seed-tts-2.0`，并使用音色 `zh_male_tiancaitongsheng_uranus_bigtts`。
-3. 接收方应收到可下载和播放的 `.mp3` 文件。
+2. 请求应调用 `qwen-audio-3.0-tts-flash`，并使用音色 `longanhuan_v3.6`。
+3. 接收方应收到通过 WAV 魔数校验、可下载和播放的 `.wav` 文件。
 4. 任务与工具调用应分别记录为 `voice_generation`、`voice.generate`，最终结果类型应为 `file`。
 
 ## 联网搜索
 
-1. 在 `config/local.yaml` 中启用 `search.enabled`。默认 `search.provider: openrouter` 会复用 OpenRouter API key。
-2. 发送 `@DangBot 联网搜索 今天 OpenRouter 有什么新闻`，机器人应调用联网搜索。
+1. 在 Hermes 模式启用 `search.enabled` 并设置 `search.provider: hermes`；搜索必须走专属 Hermes 的内建 web/browser，DangBot MCP 能力列表不得再暴露 `web.search`。
+2. 发送 `@DangBot 联网搜索 今天 Qwen 有什么新闻`，机器人应调用 Hermes 内建联网搜索。
 3. 发送 `@DangBot 杭州这周天气怎么样`，机器人应把它识别为时效外部信息并调用联网搜索。
 4. 发送 `@DangBot 今天午饭吃什么`，机器人不应调用联网搜索，应按普通问答回复。
 5. 搜索类回答应基于搜索结果组织，并在末尾附带来源 URL。

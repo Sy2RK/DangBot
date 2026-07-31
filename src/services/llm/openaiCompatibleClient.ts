@@ -3,6 +3,11 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../types.js';
 import { ensureDir } from '../../utils/fs.js';
+import {
+  DashScopeClient,
+  type DashScopeMediaInput,
+  type DashScopeVideoMode
+} from './dashScopeClient.js';
 
 export interface ChatTurn {
   role: 'system' | 'user' | 'assistant';
@@ -62,8 +67,11 @@ interface VideoJobResponse {
 }
 
 export interface VideoGenerationOptions {
+  mode?: DashScopeVideoMode;
   frameImagePath?: string;
   frameImageMimeType?: string;
+  referenceImages?: DashScopeMediaInput[];
+  sourceVideo?: DashScopeMediaInput;
   timeoutMs?: number;
   pollIntervalMs?: number;
 }
@@ -71,6 +79,7 @@ export interface VideoGenerationOptions {
 export interface ImageGenerationOptions {
   referenceImagePath?: string;
   referenceImageMimeType?: string;
+  referenceImages?: DashScopeMediaInput[];
 }
 
 export interface VoiceGenerationResult {
@@ -109,18 +118,26 @@ interface DoubaoTtsStreamMessage {
 }
 
 export class OpenAICompatibleClient {
+  private readonly dashScope: DashScopeClient;
+
   constructor(
     private readonly config: AppConfig['llm'],
     private readonly outputsDir: string,
     private readonly systemPrompt = '你是微信群里的公共智能助手。回答要清晰、简洁，并避免泄露无关隐私。'
-  ) {}
+  ) {
+    this.dashScope = new DashScopeClient(config, outputsDir);
+  }
 
   configured(): boolean {
     return this.config.apiKey.trim().length > 0;
   }
 
   speechConfigured(): boolean {
-    return this.config.tts.enabled && this.config.tts.apiKey.trim().length > 0;
+    const apiKey =
+      this.config.tts.provider === 'dashscope'
+        ? this.config.tts.apiKey || this.config.apiKey
+        : this.config.tts.apiKey;
+    return this.config.tts.enabled && apiKey.trim().length > 0;
   }
 
   async chat(
@@ -248,16 +265,39 @@ export class OpenAICompatibleClient {
       throw new Error('图片生成模型尚未配置。请设置 llm.imageModel。');
     }
 
-    const content =
+    if (this.config.provider === 'dashscope') {
+      const legacyReference =
+        options.referenceImagePath && options.referenceImageMimeType
+          ? [
+              {
+                filePath: options.referenceImagePath,
+                mimeType: options.referenceImageMimeType
+              }
+            ]
+          : [];
+      return this.dashScope.generateImage(
+        prompt,
+        { referenceImages: options.referenceImages ?? legacyReference },
+        signal
+      );
+    }
+
+    const referenceImage =
       options.referenceImagePath && options.referenceImageMimeType
-        ? [
-            { type: 'text', text: prompt },
-            mediaContent(
-              'image',
-              await fileToDataUrl(options.referenceImagePath, options.referenceImageMimeType)
-            )
-          ]
-        : prompt;
+        ? {
+            filePath: options.referenceImagePath,
+            mimeType: options.referenceImageMimeType
+          }
+        : options.referenceImages?.[0];
+    const content = referenceImage
+      ? [
+          { type: 'text', text: prompt },
+          mediaContent(
+            'image',
+            await fileToDataUrl(referenceImage.filePath, referenceImage.mimeType)
+          )
+        ]
+      : prompt;
 
     const response = await this.post<ChatCompletionResponse>(
       '/chat/completions',
@@ -290,6 +330,10 @@ export class OpenAICompatibleClient {
     }
     if (text.length > 4096) {
       throw new Error('语音合成文字不能超过 4096 个字符。');
+    }
+
+    if (this.config.tts.provider === 'dashscope') {
+      return this.dashScope.generateVoice(text, signal);
     }
 
     const body = {
@@ -340,8 +384,27 @@ export class OpenAICompatibleClient {
     options: VideoGenerationOptions = {},
     signal?: AbortSignal
   ): Promise<string> {
-    if (!this.configured() || !this.config.videoModel) {
+    if (!this.configured() || (this.config.provider !== 'dashscope' && !this.config.videoModel)) {
       throw new Error('视频生成模型尚未配置。请设置 llm.videoModel。');
+    }
+
+    if (this.config.provider === 'dashscope') {
+      const frameImage =
+        options.frameImagePath && options.frameImageMimeType
+          ? { filePath: options.frameImagePath, mimeType: options.frameImageMimeType }
+          : undefined;
+      return this.dashScope.generateVideo(
+        prompt,
+        {
+          mode: options.mode,
+          frameImage,
+          referenceImages: options.referenceImages,
+          sourceVideo: options.sourceVideo,
+          timeoutMs: options.timeoutMs,
+          pollIntervalMs: options.pollIntervalMs
+        },
+        signal
+      );
     }
 
     const body: Record<string, unknown> = {

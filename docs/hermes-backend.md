@@ -17,13 +17,15 @@ flowchart LR
     H --> D["DeepSeek v4 主 Agent"]
     D --> B["隔离网页与浏览器"]
     D --> M["DangBot MCP :18643"]
-    M --> Q["Qwen 3.7 多模态"]
-    M --> F["文件 / 媒体 / 显式记忆 / QuickJS"]
+    M --> Q["DashScope 多模态与媒体模型"]
+    M --> F["文件 / 产物 / 显式记忆 / QuickJS"]
     F --> E
     E --> A
 ```
 
 DangBot 保存 `hermes_runs`、`mcp_contexts` 和 `artifacts` 映射。Hermes 看不到宿主绝对路径；Wechaty 只发送 artifact broker 重新校验过的文件。
+
+Hermes 0.19.0 原生支持 DashScope 对话 provider，但没有 DashScope 图片、HappyHorse 视频或 Qwen Audio TTS 插件。专属 Hermes 因此原生负责 DeepSeek 规划和 web/browser；`qwen3.7-flash` 多模态、`qwen-image-3.0-pro`、`qwen-audio-3.0-tts-flash` 与 HappyHorse 统一经 DangBot MCP 调用，以保留 contextId、附件白名单、取消和 artifact broker 边界。
 
 ## 初始化
 
@@ -35,7 +37,7 @@ DangBot 保存 `hermes_runs`、`mcp_contexts` 和 `artifacts` 映射。Hermes �
 
    脚本只创建 `.runtime/hermes/venv` 和 `.runtime/hermes/home`，并安装固定 `hermes-agent==0.19.0`。不调用 `hermes profile use/clone/update`。浏览器默认只复用已安装浏览器的可执行程序，但强制使用 agent-browser 的临时未登录 profile；不会读取该浏览器的用户目录或 Cookie。需要连浏览器二进制也独立时，运行 `pnpm hermes:bootstrap:browser-download`。启动器只用 `--force` 绕过 Hermes 对“机器上已有任意 launchd 网关”的宽泛前台保护；绝不使用会停止其他进程的 `--replace`。
 
-2. 运行 `pnpm hermes:configure -- --backend legacy`，以无回显方式输入 DangBot 专用的 DeepSeek key。脚本会保留现有 OpenRouter/Qwen 配置，为专属 API、MCP 和会话分别生成随机密钥，把运行凭据写入权限为 `0600` 的忽略文件，并在 `.runtime/hermes/backups/` 留下本地配置备份。不要复用或复制 `~/.hermes/.env`。也可由无人值守部署通过临时环境变量 `DANGBOT_DEEPSEEK_API_KEY` 输入；不要把该变量写入 shell profile。
+2. 运行 `pnpm hermes:configure -- --backend legacy`，以无回显方式输入 DangBot 专用的 DeepSeek key 和中国（北京）地域 DashScope key。脚本会写入 DashScope 模型路由，为专属 API、MCP 和会话分别生成随机密钥，把运行凭据写入权限为 `0600` 的忽略文件，并在 `.runtime/hermes/backups/` 留下本地配置备份。不要复用或复制 `~/.hermes/.env`。无人值守部署可用临时环境变量 `DANGBOT_DEEPSEEK_API_KEY` 和 `DANGBOT_DASHSCOPE_API_KEY` 输入；不要把这些变量写入 shell profile。
 
 3. 给 DangBot 进程设置：
    - `DANGBOT_MCP_API_KEY`：与专属 Hermes 的同名值一致。
@@ -61,7 +63,7 @@ DangBot 保存 `hermes_runs`、`mcp_contexts` 和 `artifacts` 映射。Hermes �
 
 4. 运行 `pnpm hermes:preflight:offline`。它会启动真实 DangBot MCP、专属 Hermes API 和本地模拟 DeepSeek 接口，验证 `/v1/runs`、SSE、模型固定值及最终工具白名单；不会连接模型供应商或微信。随后再使用模拟 Wechaty 事件验证文本、搜索、多模态、文档、生成、TTS、提醒、取消、审批和 QuickJS。不得在此阶段连接真实群。
 
-5. 专属 API 与 MCP 都健康后，运行 `pnpm hermes:preflight:live`。它只通过专属 API 发起一次不调用工具的 `deepseek-v4-flash` 连通性请求，不连接微信，也不会向任何群发送消息。只有该命令通过，才允许进入真实测试群验收。
+5. 专属 API 与 MCP 都健康后，运行 `pnpm hermes:preflight:live`。它只通过专属 API 发起一次不调用工具的 `deepseek-v4-flash` 连通性请求，不连接微信，也不会向任何群发送消息。随后运行 `pnpm dashscope:preflight`，确认 `qwen3.7-flash` 文本、多模态和 Qwen Audio TTS；图片与视频生成会产生费用，默认不调用，需要供应商级真实媒体验收时显式追加 `-- --image`、`-- --video` 或 `-- --paid-media`。只有这些检查通过，才允许进入真实测试群验收。
 
 6. 检查专属 API 健康状态、MCP 工具列表、模型名和并发上限；确认宿主 terminal/file/code/memory/delegation 等工具未暴露。
 
