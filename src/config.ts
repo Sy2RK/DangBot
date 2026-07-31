@@ -186,13 +186,17 @@ const configSchema = z.object({
       enabled: booleanishSchema.default(true),
       tickMs: z.number().int().positive().default(30_000),
       timezone: z.string().min(1).default('Asia/Shanghai'),
-      maxConsecutiveFailures: z.number().int().positive().default(3)
+      maxConsecutiveFailures: z.number().int().positive().default(3),
+      retryCount: z.number().int().min(0).default(3),
+      retryDelayMs: z.number().int().positive().default(60_000)
     })
     .default({
       enabled: true,
       tickMs: 30_000,
       timezone: 'Asia/Shanghai',
-      maxConsecutiveFailures: 3
+      maxConsecutiveFailures: 3,
+      retryCount: 3,
+      retryDelayMs: 60_000
     }),
   auth: z.object({
     systemAdmins: z.array(z.string()).default([]),

@@ -720,6 +720,54 @@ export class AppDatabase {
     return rows.map(normalizeTask);
   }
 
+  listRecentCompletedTextTasks(
+    roomId: string,
+    userId: string,
+    excludeTaskId: string,
+    limit = 5
+  ): TaskRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM tasks
+        WHERE room_id = ?
+          AND user_id = ?
+          AND id <> ?
+          AND status = 'completed'
+          AND result_kind = 'text'
+          AND result_text IS NOT NULL
+          AND trim(result_text) <> ''
+        ORDER BY created_at DESC
+        LIMIT ?
+      `
+      )
+      .all(roomId, userId, excludeTaskId, limit) as DbTask[];
+    return rows.map(normalizeTask);
+  }
+
+  listRecentCompletedRoomTextTasks(
+    roomId: string,
+    excludeTaskId: string,
+    limit = 8
+  ): TaskRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM tasks
+        WHERE room_id = ?
+          AND id <> ?
+          AND status = 'completed'
+          AND result_kind = 'text'
+          AND result_text IS NOT NULL
+          AND trim(result_text) <> ''
+        ORDER BY created_at DESC
+        LIMIT ?
+      `
+      )
+      .all(roomId, excludeTaskId, limit) as DbTask[];
+    return rows.map(normalizeTask);
+  }
+
   createApproval(input: {
     taskId: string;
     roomId: string;

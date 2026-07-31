@@ -4,6 +4,7 @@ import { plainTextOutputInstruction } from './core/replyStyle.js';
 import { resolveFromCwd } from './utils/fs.js';
 
 const defaultSoul = '你是微信群里的公共智能助手。';
+const defaultCapabilityMemory = '';
 
 const assistantGuardrails = [
   '无论采用什么人格设定，都要优先提供准确、清晰、可执行的帮助。',
@@ -14,22 +15,34 @@ const assistantGuardrails = [
   plainTextOutputInstruction
 ].join('\n');
 
-export async function loadSoulPrompt(filePath = path.resolve(process.cwd(), 'SOUL.md')): Promise<string> {
-  const soul = await readSoulFile(filePath);
-  return composeSystemPrompt(soul);
+export async function loadSoulPrompt(
+  soulFilePath = path.resolve(process.cwd(), 'SOUL.md'),
+  capabilityMemoryFilePath = path.resolve(process.cwd(), 'CAPABILITIES.md')
+): Promise<string> {
+  const [soul, capabilityMemory] = await Promise.all([
+    readPromptFile(soulFilePath, defaultSoul),
+    readPromptFile(capabilityMemoryFilePath, defaultCapabilityMemory)
+  ]);
+  return composeSystemPrompt(soul, capabilityMemory);
 }
 
-export function composeSystemPrompt(soul: string): string {
+export function composeSystemPrompt(soul: string, capabilityMemory = ''): string {
   const persona = soul.trim() || defaultSoul;
-  return `${persona}\n\n${assistantGuardrails}`;
+  const capabilitySection = capabilityMemory.trim()
+    ? [
+        '下面是你关于自身现有能力的本地长期记忆。回答能力范围时必须以它为准，不夸大未实现、未配置或已停用的功能。',
+        capabilityMemory.trim()
+      ].join('\n\n')
+    : '';
+  return [persona, capabilitySection, assistantGuardrails].filter(Boolean).join('\n\n');
 }
 
-async function readSoulFile(filePath: string): Promise<string> {
+async function readPromptFile(filePath: string, fallback: string): Promise<string> {
   try {
     return (await readFile(resolveFromCwd(filePath), 'utf8')).trim();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return defaultSoul;
+      return fallback;
     }
     throw error;
   }

@@ -84,49 +84,83 @@ export class AutomationScheduler {
     this.running.add(automation.id);
     const runAt = now.toISOString();
 
-    try {
-      const current = this.db.getAutomation(automation.id);
-      if (!current || current.status !== 'active') return;
-
-      const room = this.db.getRoomById(current.roomId);
-      if (!room?.authorized || !room.enabled) {
-        throw new Error('自动化所在群未授权或未启用');
-      }
-
-      const responder = await this.responderFactory.createRoomResponder(current.roomId);
-      if (!responder) {
-        throw new Error('无法找到自动化目标群');
-      }
-
-      await this.runner.handleAutomationTrigger(current, responder);
-      this.db.updateAutomation(current.id, {
-        status: current.scheduleType === 'once' ? 'completed' : 'active',
-        consecutiveFailures: 0,
-        lastRunAt: runAt,
-        nextRunAt:
-          current.scheduleType === 'once' ? null : computeNextRunForAutomation(current, now),
-        lastError: null
-      });
-    } catch (error) {
-      const current = this.db.getAutomation(automation.id) ?? automation;
-      const message = error instanceof Error ? error.message : String(error);
-      const failures = current.consecutiveFailures + 1;
-      this.logger.error({ error, automationId: current.id }, 'automation run failed');
-      this.db.updateAutomation(current.id, {
-        status:
-          failures >= this.config.automations.maxConsecutiveFailures || current.scheduleType === 'once'
-            ? 'failed'
-            : 'active',
-        consecutiveFailures: failures,
-        lastRunAt: runAt,
-        nextRunAt:
-          current.scheduleType === 'once' ? null : computeNextRunForAutomation(current, now),
-        lastError: message
-      });
-    } finally {
+    let current = this.db.getAutomation(automation.id);
+    if (!current || current.status !== 'active') {
       this.running.delete(automation.id);
+      return;
     }
+
+    let lastError: unknown;
+    const { retryCount, retryDelayMs } = this.config.automations;
+
+    for (let attempt = 0; attempt <= retryCount; attempt++) {
+      if (attempt > 0) {
+        this.logger.info(
+          { automationId: current.id, attempt, maxRetries: retryCount },
+          'automation retry'
+        );
+        await sleep(retryDelayMs);
+      }
+
+      try {
+        const fresh = this.db.getAutomation(current.id);
+        if (!fresh || fresh.status !== 'active') {
+          this.running.delete(automation.id);
+          return;
+        }
+        current = fresh;
+
+        const room = this.db.getRoomById(current.roomId);
+        if (!room?.authorized || !room.enabled) {
+          throw new Error('自动化所在群未授权或未启用');
+        }
+
+        const responder = await this.responderFactory.createRoomResponder(current.roomId);
+        if (!responder) {
+          throw new Error('无法找到自动化目标群');
+        }
+
+        await this.runner.handleAutomationTrigger(current, responder);
+        this.db.updateAutomation(current.id, {
+          status: current.scheduleType === 'once' ? 'completed' : 'active',
+          consecutiveFailures: 0,
+          lastRunAt: runAt,
+          nextRunAt:
+            current.scheduleType === 'once' ? null : computeNextRunForAutomation(current, now),
+          lastError: null
+        });
+        this.running.delete(automation.id);
+        return;
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(
+          { error, automationId: current.id, attempt },
+          'automation attempt failed'
+        );
+      }
+    }
+
+    const finalError = lastError instanceof Error ? lastError.message : String(lastError);
+    const failures = current.consecutiveFailures + 1;
+    this.logger.error({ error: lastError, automationId: current.id }, 'automation run failed');
+    this.db.updateAutomation(current.id, {
+      status:
+        failures >= this.config.automations.maxConsecutiveFailures || current.scheduleType === 'once'
+          ? 'failed'
+          : 'active',
+      consecutiveFailures: failures,
+      lastRunAt: runAt,
+      nextRunAt:
+        current.scheduleType === 'once' ? null : computeNextRunForAutomation(current, now),
+      lastError: finalError
+    });
+
+    this.running.delete(automation.id);
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function parseAutomationDefinitionWithLlm(

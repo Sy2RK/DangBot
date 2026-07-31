@@ -3,6 +3,37 @@ import { AppDatabase } from '../src/storage/database.js';
 import { makeTestConfig } from './helpers.js';
 
 describe('AppDatabase', () => {
+  it('lists recent completed text tasks for document generation', async () => {
+    const config = await makeTestConfig();
+    const db = AppDatabase.memory();
+    db.seedConfig(config);
+    const source = db.createTask({
+      roomId: 'room1',
+      userId: 'user1',
+      requestType: 'rewrite',
+      prompt: '润色材料'
+    });
+    db.updateTask(source.id, {
+      status: 'completed',
+      resultKind: 'text',
+      resultText: '润色后的正文'
+    });
+    const current = db.createTask({
+      roomId: 'room1',
+      userId: 'user1',
+      requestType: 'document_generation',
+      prompt: '做成 DOCX'
+    });
+
+    expect(
+      db.listRecentCompletedTextTasks('room1', 'user1', current.id)
+    ).toMatchObject([{ id: source.id, resultText: '润色后的正文' }]);
+    expect(db.listRecentCompletedRoomTextTasks('room1', current.id)).toMatchObject([
+      { id: source.id, resultText: '润色后的正文' }
+    ]);
+    db.close();
+  });
+
   it('seeds configured rooms and resolves roles', async () => {
     const config = await makeTestConfig();
     const db = AppDatabase.memory();

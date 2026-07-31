@@ -46,7 +46,7 @@ export const replyPhrases = {
 };
 
 export function normalizeOutgoingText(text: string): string {
-  const normalized = text.replace(/\r\n/g, '\n').trim();
+  const normalized = redactLocalPaths(text).replace(/\r\n/g, '\n').trim();
   if (!normalized) return '';
 
   const withoutFences = normalized
@@ -104,6 +104,12 @@ export function normalizeOutgoingText(text: string): string {
   }
 
   return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export function redactLocalPaths(text: string): string {
+  return text
+    .replace(/(?:file:\/\/)?\/Users\/[^\s，。；;]+/g, '[本地路径已隐藏]')
+    .replace(/(?:file:\/\/)?\/tmp\/[^\s，。；;]+/g, '[本地路径已隐藏]');
 }
 
 export function formatPlainList(title: string, items: string[], emptyText?: string): string {

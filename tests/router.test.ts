@@ -1,7 +1,10 @@
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { Document, Packer, Paragraph } from 'docx';
+import mammoth from 'mammoth';
 import { describe, expect, it, vi } from 'vitest';
+import type { AttachmentSource } from '../src/core/intentClassifier.js';
 import { BotRequestRouter } from '../src/core/router.js';
 import { TaskQueue } from '../src/domain/taskQueue.js';
 import { FileService } from '../src/services/files/fileService.js';
@@ -761,6 +764,142 @@ describe('BotRequestRouter', () => {
     expect(responder.texts).toContain('完成啦，结果在下面。');
   });
 
+  it('reads a recent DOCX for a later rewrite request and returns an edited DOCX', async () => {
+    const filePath = await tempDocx('发言材料.docx', '这是需要润色的原始发言材料。');
+    const { router, db } = await setup({
+      enabled: true,
+      intent: 'rewrite',
+      attachmentSource: 'recent_attachment',
+      chat: async (messages) =>
+        messages.at(-1)?.content.includes('请用 2 到 4 行说明你打算怎么做')
+          ? '我先读取刚才的文档，再按要求润色，最后发回 DOCX。'
+          : '润色后的发言标题\n\n这是润色并缩减后的完整发言材料。'
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({
+        mentioned: false,
+        text: '',
+        attachments: [
+          attachment(
+            filePath,
+            '发言材料.docx',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'file'
+          )
+        ]
+      }),
+      responder
+    );
+    await router.handleMessage(
+      message({
+        mentioned: true,
+        mentionText: '帮我润色这篇发言材料，缩减到1200字左右'
+      }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toHaveLength(1));
+    const task = db
+      .listRoomTasks('room1', 10)
+      .find((candidate) => candidate.prompt.includes('缩减到1200字'));
+    expect(task).toMatchObject({ requestType: 'rewrite', toolName: 'file.analyze' });
+    expect(db.listTaskAttachments(task!.id)).toHaveLength(1);
+    expect(path.extname(responder.files[0]!)).toBe('.docx');
+    const parsed = await mammoth.extractRawText({ path: responder.files[0]! });
+    expect(parsed.value).toContain('润色后的发言标题');
+    expect(parsed.value).toContain('这是润色并缩减后的完整发言材料。');
+  });
+
+  it('routes translation of a recent text file through file analysis and keeps the format', async () => {
+    const filePath = await tempFile('brief.txt', '需要翻译的中文正文。');
+    const { router, db } = await setup({
+      enabled: true,
+      intent: 'translate',
+      attachmentSource: 'recent_attachment',
+      chat: async (messages) =>
+        messages.at(-1)?.content.includes('请用 2 到 4 行说明你打算怎么做')
+          ? '我先读取刚才的文件，再翻译完整正文，最后发回同格式文件。'
+          : 'The translated body.'
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({
+        mentioned: false,
+        text: '',
+        attachments: [attachment(filePath, 'brief.txt', 'text/plain', 'file')]
+      }),
+      responder
+    );
+    await router.handleMessage(
+      message({ mentioned: true, mentionText: '把刚才的文件翻译成英文' }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toHaveLength(1));
+    const task = db
+      .listRoomTasks('room1', 10)
+      .find((candidate) => candidate.prompt.includes('翻译成英文'));
+    expect(task).toMatchObject({ requestType: 'translate', toolName: 'file.analyze' });
+    expect(path.extname(responder.files[0]!)).toBe('.txt');
+    expect(await readFile(responder.files[0]!, 'utf8')).toBe('The translated body.');
+  });
+
+  it('creates and sends a real DOCX from a recent completed text result', async () => {
+    const { router, db } = await setup({
+      enabled: true,
+      intent: 'document_generation',
+      chat: async (messages) => {
+        if (messages.at(-1)?.content.includes('请用 2 到 4 行说明你打算怎么做')) {
+          return '我先找到刚才润色后的正文，再生成 DOCX 文件发出来。';
+        }
+        if (messages[0]?.content.includes('内部文档生成工具')) {
+          return '红心向党践初心，青红融合促发展\n\n这是润色后的完整正文。';
+        }
+        return 'mock answer';
+      }
+    });
+    const source = db.createTask({
+      roomId: 'room1',
+      userId: 'another-user',
+      requestType: 'rewrite',
+      prompt: '润色发言材料'
+    });
+    db.updateTask(source.id, {
+      status: 'completed',
+      resultKind: 'text',
+      resultText:
+        '下面是修改润色后的版本：\n\n红心向党践初心，青红融合促发展\n\n这是润色后的完整正文。'
+    });
+    const responder = new MemoryResponder();
+
+    await router.handleMessage(
+      message({
+        mentioned: true,
+        mentionText: '重新把你润色后的文字写成一个docx文档发群里'
+      }),
+      responder
+    );
+
+    await vi.waitFor(() => expect(responder.files).toHaveLength(1));
+    const task = db
+      .listRoomTasks('room1', 10)
+      .find((candidate) => candidate.prompt.includes('docx文档发群'));
+    expect(task).toMatchObject({
+      requestType: 'document_generation',
+      toolName: 'document.create',
+      resultKind: 'file'
+    });
+    expect(task?.resultText).toBeFalsy();
+    expect(path.extname(responder.files[0]!)).toBe('.docx');
+    const parsed = await mammoth.extractRawText({ path: responder.files[0]! });
+    expect(parsed.value).toContain('红心向党践初心，青红融合促发展');
+    expect(parsed.value).toContain('这是润色后的完整正文。');
+    expect(responder.texts.join('\n')).not.toContain('/Users/');
+  });
+
   it('does not load attachments for unauthorized rooms or non-normal commands', async () => {
     const { router } = await setup({ enabled: false });
     const responder = new MemoryResponder();
@@ -1185,6 +1324,7 @@ async function setup(
     ) => Promise<string>;
     agent?: (messages: Array<{ role: string; content: string }>) => Promise<string> | string;
     intent?: RequestKind | ((classificationPrompt: string) => RequestKind);
+    attachmentSource?: AttachmentSource | ((classificationPrompt: string) => AttachmentSource);
     generateVoice?: (text: string) => Promise<{ filePath: string }>;
     webSearchAnswer?: string;
     searchEnabled?: boolean;
@@ -1244,7 +1384,11 @@ async function setup(
           requestType:
             typeof options.intent === 'function'
               ? options.intent(messages.at(-1)?.content ?? '')
-              : (options.intent ?? classifyIntentForRouterTest(messages.at(-1)?.content ?? ''))
+              : (options.intent ?? classifyIntentForRouterTest(messages.at(-1)?.content ?? '')),
+          attachmentSource:
+            typeof options.attachmentSource === 'function'
+              ? options.attachmentSource(messages.at(-1)?.content ?? '')
+              : (options.attachmentSource ?? 'none')
         });
       }
 
@@ -1383,6 +1527,12 @@ function automationDefinitionForRouterTest(prompt: string): string {
 
 function classifyIntentForRouterTest(classificationPrompt: string): RequestKind {
   if (
+    classificationPrompt.includes('docx文档发群') ||
+    classificationPrompt.includes('制作成 DOCX')
+  ) {
+    return 'document_generation';
+  }
+  if (
     classificationPrompt.includes('联网搜索') ||
     classificationPrompt.includes('搜索一下') ||
     classificationPrompt.includes('最新消息') ||
@@ -1452,6 +1602,20 @@ async function tempFile(fileName: string, content: string): Promise<string> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dangbot-router-'));
   const filePath = path.join(dir, fileName);
   await writeFile(filePath, content);
+  return filePath;
+}
+
+async function tempDocx(fileName: string, content: string): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dangbot-router-'));
+  const filePath = path.join(dir, fileName);
+  await writeFile(
+    filePath,
+    await Packer.toBuffer(
+      new Document({
+        sections: [{ children: [new Paragraph(content)] }]
+      })
+    )
+  );
   return filePath;
 }
 

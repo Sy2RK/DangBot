@@ -5,6 +5,7 @@ import {
 } from '../services/search/braveSearchClient.js';
 import { currentBeijingDateContext, currentBeijingDateLabel } from '../utils/time.js';
 import { appendPlainSources } from '../core/replyStyle.js';
+import { redactLocalPaths } from '../core/replyStyle.js';
 import type { RequestKind } from '../types.js';
 import type { ToolDefinition, ToolExecutionContext } from './registry.js';
 import { ToolRegistry } from './registry.js';
@@ -48,6 +49,8 @@ export function toolNameForRequestKind(requestType: RequestKind): string | undef
       return 'voice.generate';
     case 'video_generation':
       return 'video.generate';
+    case 'document_generation':
+      return 'document.create';
     default:
       return undefined;
   }
@@ -88,6 +91,16 @@ function builtinToolDefinitions(): ToolDefinition[] {
       allowedRoles: ['member', 'group_admin', 'system_admin'],
       canRunAsSupport: true,
       execute: executeFileAnalysis
+    },
+    {
+      name: 'document.create',
+      description: '把最近相关的已完成文字结果制作成可下载的 DOCX 文件。',
+      inputDescription: '{"prompt":"用户希望把哪段已有结果制作成 DOCX"}',
+      inputSchema: promptInput,
+      riskLevel: 'medium',
+      allowedRoles: ['member', 'group_admin', 'system_admin'],
+      terminalResult: true,
+      execute: executeDocumentCreation
     },
     {
       name: 'image.analyze',
@@ -278,19 +291,106 @@ async function executeFileAnalysis(ctx: ToolExecutionContext, input: z.infer<typ
   }
   const fileText = await ctx.fileService.extractText(attachment);
   await ctx.stage('文件内容已经读出来啦。');
+  const editTask =
+    ctx.task.requestType === 'rewrite' || ctx.task.requestType === 'translate'
+      ? ctx.task.requestType
+      : undefined;
   const text = await ctx.llm.chat(
     [
-      ctx.system,
+      editTask
+        ? {
+            role: 'system',
+            content: [
+              ctx.system.content,
+              '你正在编辑用户提供的文档。',
+              '只输出编辑后的完整正文，不要解释、前言、完成提示、文件名、Markdown 代码围栏或额外聊天内容。',
+              '尽量保留原文的段落层次、标题和编号；除非用户要求，不要遗漏正文。'
+            ].join('\n\n')
+          }
+        : ctx.system,
       {
         role: 'user',
-        content: [`用户请求：${input.prompt}`, `文件名：${attachment.fileName}`, '文件内容：', fileText].join('\n\n')
+        content: [
+          `用户请求：${input.prompt}`,
+          `文件名：${attachment.fileName}`,
+          '文件内容：',
+          fileText
+        ].join('\n\n')
       }
     ],
     ctx.signal,
     { temperature: 0.25 }
   );
+  if (editTask) {
+    const filePath = await ctx.fileService.writeEditedResult(attachment, text.trim(), editTask);
+    if (filePath) {
+      await ctx.stage('编辑后的文档已经按原文件类型装好啦。');
+      return { kind: 'file' as const, filePath, summary: text };
+    }
+  }
   await ctx.stage('文件里的重点已经整理好啦。');
   return { kind: 'text' as const, text, summary: text };
+}
+
+async function executeDocumentCreation(
+  ctx: ToolExecutionContext,
+  input: z.infer<typeof promptInput>
+) {
+  const candidates = ctx.db.listRecentCompletedRoomTextTasks(ctx.task.roomId, ctx.task.id, 8);
+  if (candidates.length === 0) {
+    throw new Error('没有找到可制作成文档的最近文字结果。请先让我生成或修改正文。');
+  }
+
+  await ctx.stage('我找到最近的文字结果啦，正在核对要装进文档的是哪一版。');
+  const content = (
+    await ctx.llm.chat(
+      [
+        {
+          role: 'system',
+          content: [
+            ctx.system.content,
+            '你正在为内部文档生成工具选择并清理正文。',
+            '根据用户当前请求，从候选历史结果中选择最相关的一项。',
+            '只输出应该写入 DOCX 的完整正文，不要聊天语气、解释、完成提示、Markdown、[文件结果] 或任何本地路径。',
+            '除去候选结果前后的闲聊和介绍，但不要擅自改写正文内容。'
+          ].join('\n\n')
+        },
+        {
+          role: 'user',
+          content: [
+            `当前请求：${input.prompt}`,
+            '候选历史结果：',
+            ...candidates.map((candidate, index) =>
+              [
+                `候选 ${index + 1}`,
+                `任务类型：${candidate.requestType}`,
+                `原请求：${candidate.prompt}`,
+                `结果：\n${redactLocalPaths(candidate.resultText ?? '').slice(0, 12_000)}`
+              ].join('\n')
+            )
+          ].join('\n\n')
+        }
+      ],
+      ctx.signal,
+      { temperature: 0 }
+    )
+  ).trim();
+  if (!content || content.includes('[本地路径已隐藏]')) {
+    throw new Error('没有整理出可写入文档的有效正文。');
+  }
+
+  const title = documentTitle(content);
+  const filePath = await ctx.fileService.writeDocxResult(title, content);
+  await ctx.stage('DOCX 文档已经生成，准备作为微信附件发送。');
+  return { kind: 'file' as const, filePath, summary: `${title}.docx` };
+}
+
+function documentTitle(content: string): string {
+  const firstLine = content
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+  return firstLine?.slice(0, 50) || '小当文档';
 }
 
 async function executeWebSearch(

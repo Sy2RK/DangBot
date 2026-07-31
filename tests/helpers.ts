@@ -100,7 +100,9 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       enabled: true,
       tickMs: 30_000,
       timezone: 'Asia/Shanghai',
-      maxConsecutiveFailures: 3
+      maxConsecutiveFailures: 3,
+      retryCount: 0,
+      retryDelayMs: 60_000
     },
     auth: {
       systemAdmins: ['sys'],

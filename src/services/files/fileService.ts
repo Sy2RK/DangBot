@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { Document, Packer, Paragraph, TextRun } from 'docx';
 import ExcelJS from 'exceljs';
 import mammoth from 'mammoth';
 import { lookup } from 'mime-types';
@@ -119,6 +120,41 @@ export class FileService {
     return filePath;
   }
 
+  async writeEditedResult(
+    source: AttachmentRecord,
+    content: string,
+    operation: 'rewrite' | 'translate'
+  ): Promise<string | undefined> {
+    const ext = path.extname(source.fileName).toLowerCase();
+    if (!['.txt', '.md', '.docx'].includes(ext)) return undefined;
+
+    await ensureDir(this.config.storage.outputsDir);
+    const baseName = safeFileName(path.basename(source.fileName, ext));
+    const label = operation === 'translate' ? '翻译版' : '润色版';
+    const filePath = path.join(
+      this.config.storage.outputsDir,
+      `${baseName}_${label}_${Date.now()}${ext}`
+    );
+
+    if (ext === '.docx') {
+      await writeFile(filePath, await buildDocxBuffer(content));
+      return filePath;
+    }
+
+    await writeFile(filePath, content, 'utf8');
+    return filePath;
+  }
+
+  async writeDocxResult(title: string, content: string): Promise<string> {
+    await ensureDir(this.config.storage.outputsDir);
+    const filePath = path.join(
+      this.config.storage.outputsDir,
+      `${safeFileName(title)}_${Date.now()}.docx`
+    );
+    await writeFile(filePath, await buildDocxBuffer(content));
+    return filePath;
+  }
+
   async writeTextAsXlsx(title: string, rows: Array<Record<string, string | number>>): Promise<string> {
     await ensureDir(this.config.storage.outputsDir);
     const fileName = `${safeFileName(title)}_${Date.now()}.xlsx`;
@@ -139,6 +175,19 @@ export class FileService {
   guessMimeType(fileName: string): string {
     return lookup(fileName) || 'application/octet-stream';
   }
+}
+
+async function buildDocxBuffer(content: string): Promise<Buffer> {
+  const paragraphs = content.split('\n').map(
+    (line) =>
+      new Paragraph({
+        children: line ? [new TextRun(line)] : []
+      })
+  );
+  const document = new Document({
+    sections: [{ children: paragraphs.length > 0 ? paragraphs : [new Paragraph('')] }]
+  });
+  return Packer.toBuffer(document);
 }
 
 function limitForKind(kind: AttachmentKind, config: AppConfig): number {

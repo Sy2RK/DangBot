@@ -1,7 +1,9 @@
 import pino from 'pino';
 import { describe, expect, it } from 'vitest';
 import {
+  classifyRequest,
   classifyRequestKind,
+  parseRequestClassification,
   parseRequestKind
 } from '../src/core/intentClassifier.js';
 import type { OpenAICompatibleClient } from '../src/services/llm/openaiCompatibleClient.js';
@@ -43,7 +45,7 @@ describe('intentClassifier', () => {
     let userPrompt = '';
     const llm = mockLlm(async (messages) => {
       userPrompt = messages.at(-1)?.content ?? '';
-      return '{"requestType":"image_generation"}';
+      return '{"requestType":"image_generation","attachmentSource":"current_attachment"}';
     });
 
     const requestType = await classifyRequestKind(
@@ -58,6 +60,81 @@ describe('intentClassifier', () => {
     expect(userPrompt).toContain('cat.png');
   });
 
+  it('infers an attachment source when the LLM omits only that field', async () => {
+    const llm = mockLlm(async () => '{"requestType":"translate"}');
+
+    const classification = await classifyRequest(
+      '翻译刚才的文档',
+      [],
+      [
+        {
+          name: 'brief.docx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          kind: 'file'
+        }
+      ],
+      llm,
+      silentLogger()
+    );
+
+    expect(classification).toEqual({
+      requestType: 'translate',
+      attachmentSource: 'recent_attachment'
+    });
+  });
+
+  it('respects an explicit none source for direct text editing', async () => {
+    const llm = mockLlm(async () => '{"requestType":"rewrite","attachmentSource":"none"}');
+
+    const classification = await classifyRequest(
+      '把这句话改得简洁一点：今天的会议非常重要',
+      [],
+      [
+        {
+          name: 'older.docx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          kind: 'file'
+        }
+      ],
+      llm,
+      silentLogger()
+    );
+
+    expect(classification).toEqual({
+      requestType: 'rewrite',
+      attachmentSource: 'none'
+    });
+  });
+
+  it('lets the LLM bind rewrite requests to a recent attachment', async () => {
+    let userPrompt = '';
+    const llm = mockLlm(async (messages) => {
+      userPrompt = messages.at(-1)?.content ?? '';
+      return '{"requestType":"rewrite","attachmentSource":"recent_attachment"}';
+    });
+
+    const classification = await classifyRequest(
+      '帮我润色这篇材料，缩减到1200字',
+      [],
+      [
+        {
+          name: '发言材料.docx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          kind: 'file'
+        }
+      ],
+      llm,
+      silentLogger()
+    );
+
+    expect(classification).toEqual({
+      requestType: 'rewrite',
+      attachmentSource: 'recent_attachment'
+    });
+    expect(userPrompt).toContain('当前消息附件：无');
+    expect(userPrompt).toContain('该用户最近的有效附件：1、kind=file name=发言材料.docx');
+  });
+
   it('parses strict JSON, fenced JSON, and bare request type tokens', () => {
     expect(parseRequestKind('{"requestType":"file_analysis"}')).toBe('file_analysis');
     expect(parseRequestKind('```json\n{"request_type":"video_generation"}\n```')).toBe(
@@ -65,6 +142,17 @@ describe('intentClassifier', () => {
     );
     expect(parseRequestKind('WEB_SEARCH')).toBe('web_search');
     expect(parseRequestKind('{"requestType":"voice_generation"}')).toBe('voice_generation');
+    expect(parseRequestKind('{"requestType":"document_generation"}')).toBe(
+      'document_generation'
+    );
+    expect(
+      parseRequestClassification(
+        '{"requestType":"translate","attachmentSource":"current_attachment"}'
+      )
+    ).toEqual({
+      requestType: 'translate',
+      attachmentSource: 'current_attachment'
+    });
   });
 
   it('does not fall back to regex-like local intent rules when LLM output is invalid', async () => {

@@ -38,6 +38,7 @@ export type RequestKind =
   | 'image_generation'
   | 'voice_generation'
   | 'video_generation'
+  | 'document_generation'
   | 'report'
   | 'room_minutes'
   | 'data整理'
@@ -145,6 +146,8 @@ export interface AppConfig {
     tickMs: number;
     timezone: string;
     maxConsecutiveFailures: number;
+    retryCount: number;
+    retryDelayMs: number;
   };
   auth: {
     systemAdmins: string[];

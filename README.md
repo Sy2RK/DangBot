@@ -41,10 +41,14 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - Supported file/media types: `txt`, `md`, `csv`, `xlsx`, `docx`, `pdf`, `png`, `jpg`, `jpeg`, `webp`, `mp4`, `mpeg`, `mpg`, `mov`, `webm`, and `m4v`.
 - Images sent as regular WeChat file attachments are still classified as images by extension, so follow-up requests like `分析刚才的图` or `把这张图动起来` can use them.
 - Attachments are cached locally for a limited time and are scoped by room and user.
+- Follow-up requests can bind to the sender's recent valid file. Attachment-backed rewrite and translation tasks read the file instead of treating the request as plain chat.
+- Edited `docx`, `txt`, and `md` files are uploaded back in the same file type. Generated DOCX files preserve editable text and paragraph breaks, but complex source styling and embedded objects are not guaranteed to survive.
 - Voice generation calls Doubao's `seed-tts-2.0` HTTP streaming API with the configured speaker, joins its base64-encoded MP3 chunks, and sends the resulting `.mp3` through the existing WeChat file path.
 
 ## Memory
 
+- `CAPABILITIES.md` is Xiao Dang's local self-capability memory. It is loaded into the system prompt at startup, stays separate from user/global memories, and cannot be cleared by chat commands.
+- Every user-facing feature change must update `CAPABILITIES.md` in the same change so the bot can describe what it can and cannot do accurately in its cat voice.
 - Short-term personal context keeps the latest 32 user/assistant messages.
 - Short-term room context keeps the latest 160 public room messages, including normal group chat, mentioned requests, and DangBot task replies.
 - Normal replies keep personal context isolated, but also receive a small recent room-context window so the bot can follow shared group references.

@@ -76,6 +76,8 @@ automations:
   tickMs: 30000
   timezone: Asia/Shanghai
   maxConsecutiveFailures: 3
+  retryCount: 3
+  retryDelayMs: 60000
 auth:
   systemAdmins: []
   allowTopicRoomBinding: false

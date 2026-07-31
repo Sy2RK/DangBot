@@ -1,7 +1,12 @@
 import { constants as fsConstants } from 'node:fs';
 import { access } from 'node:fs/promises';
+import path from 'node:path';
 import type { Logger } from 'pino';
-import { classifyRequestKind } from './intentClassifier.js';
+import {
+  classifyRequest,
+  classifyRequestKind,
+  type ClassificationAttachment
+} from './intentClassifier.js';
 import { parseCommand } from './parser.js';
 import {
   buildAgentMessages,
@@ -936,13 +941,36 @@ export class BotRequestRouter {
     );
     if (attachmentRecords === undefined) return;
 
-    const requestType = await classifyRequestKind(prompt, attachments, this.llm, this.logger);
-    if (!this.allowTypedRateLimit(roomId, requestType)) {
+    const recentAttachment =
+      attachmentRecords.length === 0
+        ? (this.db.getRecentAttachment(roomId, message.senderId, 'file') ??
+          this.db.getRecentAttachment(roomId, message.senderId))
+        : undefined;
+    const classification = await classifyRequest(
+      prompt,
+      attachments.map(toClassificationAttachment),
+      recentAttachment ? [toClassificationAttachment(recentAttachment)] : [],
+      this.llm,
+      this.logger
+    );
+    const requestType = classification.requestType;
+    const currentSourceAttachment = selectCurrentSourceAttachment(requestType, attachmentRecords);
+    const sourceAttachment =
+      classification.attachmentSource === 'recent_attachment'
+        ? recentAttachment
+        : classification.attachmentSource === 'current_attachment'
+          ? currentSourceAttachment
+          : undefined;
+    const taskAttachments =
+      classification.attachmentSource === 'recent_attachment' && recentAttachment
+        ? [recentAttachment]
+        : attachmentRecords;
+    const toolName = toolNameForClassifiedRequest(requestType, sourceAttachment);
+    if (!this.allowTypedRateLimit(roomId, requestType, toolName)) {
       await this.replyPlain(responder, replyPhrases.typedRateLimited);
       return;
     }
 
-    const toolName = toolNameForRequestKind(requestType);
     const toolInput = toolName ? buildToolInputForRequest(requestType, prompt) : undefined;
     const toolInputJson = toolName ? stringifyToolInput(toolInput) : undefined;
     const tool = toolName ? this.tools.get(toolName) : undefined;
@@ -977,7 +1005,7 @@ export class BotRequestRouter {
       toolName,
       toolInputJson
     });
-    this.db.linkTaskAttachments(task.id, attachmentRecords);
+    this.db.linkTaskAttachments(task.id, taskAttachments);
 
     this.db.addAudit({
       roomId,
@@ -1006,15 +1034,19 @@ export class BotRequestRouter {
 
     if (requestType === 'voice_generation') {
       await this.replyPlain(responder, replyPhrases.voiceFileGenerating);
-    } else if (shouldUseStepOutput(requestType)) {
+    } else if (shouldUseStepOutput(requestType, toolName)) {
       await this.createProgressReporter(responder, true, task.id).received();
     }
 
-    void this.enqueueTask(task, attachmentRecords, responder).catch(() => undefined);
+    void this.enqueueTask(task, taskAttachments, responder).catch(() => undefined);
   }
 
-  private allowTypedRateLimit(roomId: string, requestType: RequestKind): boolean {
-    if (requestType === 'file_analysis') {
+  private allowTypedRateLimit(
+    roomId: string,
+    requestType: RequestKind,
+    toolName?: string
+  ): boolean {
+    if (requestType === 'file_analysis' || toolName === 'file.analyze') {
       return this.limiter.allow(`file:${roomId}`, this.config.limits.fileTasksPerMinute, 60_000);
     }
 
@@ -1051,17 +1083,20 @@ export class BotRequestRouter {
     attachments: AttachmentRecord[],
     responder: BotResponder
   ): Promise<void> {
-    const longRunning = [
-      'file_analysis',
-      'image_analysis',
-      'video_analysis',
-      'image_generation',
-      'voice_generation',
-      'video_generation',
-      'report',
-      'room_minutes',
-      'data整理'
-    ].includes(task.requestType);
+    const longRunning =
+      task.toolName === 'file.analyze' ||
+      [
+        'file_analysis',
+        'image_analysis',
+        'video_analysis',
+        'image_generation',
+        'voice_generation',
+        'video_generation',
+        'document_generation',
+        'report',
+        'room_minutes',
+        'data整理'
+      ].includes(task.requestType);
 
     return this.queue.enqueue(
       task,
@@ -1074,7 +1109,7 @@ export class BotRequestRouter {
           const message = error instanceof Error ? error.message : String(error);
           const progress = this.createProgressReporter(
             responder,
-            shouldUseStepOutput(task.requestType),
+            shouldUseStepOutput(task.requestType, task.toolName),
             task.id
           );
           const reply = progress.enabled
@@ -1106,7 +1141,7 @@ export class BotRequestRouter {
       attachments.length > 0 ? attachments : this.db.listTaskAttachments(taskId);
     const progress = this.createProgressReporter(
       responder,
-      shouldUseStepOutput(task.requestType),
+      shouldUseStepOutput(task.requestType, task.toolName),
       task.id
     );
     this.appendRoomContext(
@@ -1130,7 +1165,8 @@ export class BotRequestRouter {
     signal: AbortSignal
   ): Promise<TaskPlan> {
     const fallback = buildTemplateTaskPlan(task, attachments);
-    if (!shouldUseLlmPlan(task.requestType) || !this.llm.configured()) return fallback;
+    if (!shouldUseLlmPlan(task.requestType, task.toolName) || !this.llm.configured())
+      return fallback;
 
     try {
       const dateContext = currentBeijingDateContext();
@@ -1639,7 +1675,7 @@ export class BotRequestRouter {
       this.appendRoomContext(
         task.roomId,
         'assistant',
-        `${this.config.bot.name}: [图片结果] ${result.imagePath}`
+        `${this.config.bot.name}: [图片结果] ${path.basename(result.imagePath)}`
       );
       return;
     }
@@ -1655,7 +1691,7 @@ export class BotRequestRouter {
       this.appendRoomContext(
         task.roomId,
         'assistant',
-        `${this.config.bot.name}: [文件结果] ${result.filePath}`
+        `${this.config.bot.name}: [文件结果] ${path.basename(result.filePath)}`
       );
       return;
     }
@@ -1726,13 +1762,15 @@ function normalizeMemoryText(text?: string): string {
   return normalized.length > 1000 ? `${normalized.slice(0, 1000)}...` : normalized;
 }
 
-function shouldUseStepOutput(requestType: RequestKind): boolean {
+function shouldUseStepOutput(requestType: RequestKind, toolName?: string): boolean {
+  if (toolName === 'file.analyze') return true;
   return [
     'file_analysis',
     'image_analysis',
     'video_analysis',
     'image_generation',
     'video_generation',
+    'document_generation',
     'web_search',
     'summary',
     'room_minutes',
@@ -1741,12 +1779,28 @@ function shouldUseStepOutput(requestType: RequestKind): boolean {
   ].includes(requestType);
 }
 
-function shouldUseLlmPlan(requestType: RequestKind): boolean {
-  return ['file_analysis', 'summary', 'room_minutes', 'report', 'data整理'].includes(requestType);
+function shouldUseLlmPlan(requestType: RequestKind, toolName?: string): boolean {
+  if (toolName === 'file.analyze') return true;
+  return [
+    'file_analysis',
+    'document_generation',
+    'summary',
+    'room_minutes',
+    'report',
+    'data整理'
+  ].includes(requestType);
 }
 
 function buildTemplateTaskPlan(task: TaskRecord, attachments: AttachmentRecord[]): TaskPlan {
   const hasAttachment = attachments.length > 0;
+  if (task.toolName === 'file.analyze') {
+    return {
+      text: hasAttachment
+        ? '我打算先把文件内容读出来，再按你的要求完整处理，最后把编辑后的文档发回来。'
+        : '我打算先找一下最近的文件，再读内容、按要求处理，最后把结果发回来。',
+      source: 'template'
+    };
+  }
   const textByKind: Partial<Record<RequestKind, string>> = {
     file_analysis: hasAttachment
       ? '我打算先把文件内容读出来，再按你的要求抓重点，最后整理成好读的结果给你。'
@@ -1887,4 +1941,40 @@ function truncateRoomContextEntry(content: string): string {
   const normalized = content.replace(/\s+/g, ' ').trim();
   if (normalized.length <= roomContextEntryMaxChars) return normalized;
   return `${normalized.slice(0, roomContextEntryMaxChars)}...`;
+}
+
+function toClassificationAttachment(
+  attachment: IncomingAttachment | AttachmentRecord
+): ClassificationAttachment {
+  return {
+    name: 'name' in attachment ? attachment.name : attachment.fileName,
+    mimeType: attachment.mimeType,
+    kind: attachment.kind
+  };
+}
+
+function toolNameForClassifiedRequest(
+  requestType: RequestKind,
+  sourceAttachment?: AttachmentRecord
+): string | undefined {
+  if (
+    sourceAttachment?.kind === 'file' &&
+    ['qa', 'summary', 'rewrite', 'translate', 'report', 'data整理'].includes(requestType)
+  ) {
+    return 'file.analyze';
+  }
+  return toolNameForRequestKind(requestType);
+}
+
+function selectCurrentSourceAttachment(
+  requestType: RequestKind,
+  attachments: AttachmentRecord[]
+): AttachmentRecord | undefined {
+  const expectedKind =
+    requestType === 'image_analysis' || requestType === 'image_generation'
+      ? 'image'
+      : requestType === 'video_analysis' || requestType === 'video_generation'
+        ? 'video'
+        : 'file';
+  return attachments.find((attachment) => attachment.kind === expectedKind);
 }

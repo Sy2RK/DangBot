@@ -72,11 +72,49 @@ export class WechatyAdapter {
   async createRoomResponder(roomId: string): Promise<BotResponder | undefined> {
     if (!this.bot?.Room) return undefined;
 
-    const room =
-      (typeof this.bot.Room.load === 'function' ? this.bot.Room.load(roomId) : undefined) ??
-      (typeof this.bot.Room.find === 'function' ? await this.bot.Room.find({ id: roomId }) : undefined);
+    const room = (await this.findLiveRoom(roomId)) ?? this.loadRoom(roomId);
     if (!room) return undefined;
-    return new WechatyResponder(room, undefined, this.config.bot.name);
+    return new WechatyResponder(room, undefined, this.config.bot.name, this.logger);
+  }
+
+  private async findLiveRoom(roomId: string): Promise<WechatyRoom | undefined> {
+    if (typeof this.bot.Room.find !== 'function') return undefined;
+
+    const config = this.config.auth.rooms.find(
+      (room) => room.stableId === roomId || room.id === roomId || room.runtimeIds?.includes(roomId)
+    );
+    if (config?.topic) {
+      const room = await this.findRoom({ topic: config.topic });
+      if (room) return room;
+    }
+
+    const ids = new Set([roomId, config?.stableId, config?.id, ...(config?.runtimeIds ?? [])]);
+    for (const id of ids) {
+      if (!id) continue;
+      const room = await this.findRoom({ id });
+      if (room) return room;
+    }
+
+    return undefined;
+  }
+
+  private async findRoom(query: Record<string, string>): Promise<WechatyRoom | undefined> {
+    try {
+      return (await this.bot.Room.find(query)) ?? undefined;
+    } catch (error) {
+      this.logger.debug({ error, query }, 'wechat room find failed');
+      return undefined;
+    }
+  }
+
+  private loadRoom(roomId: string): WechatyRoom | undefined {
+    if (typeof this.bot.Room.load !== 'function') return undefined;
+    try {
+      return this.bot.Room.load(roomId) ?? undefined;
+    } catch (error) {
+      this.logger.debug({ error, roomId }, 'wechat room load failed');
+      return undefined;
+    }
   }
 
   private async onMessage(message: WechatyMessage): Promise<void> {
@@ -105,7 +143,7 @@ export class WechatyAdapter {
       timestamp: new Date()
     };
 
-    const responder = new WechatyResponder(room, talker, this.config.bot.name);
+    const responder = new WechatyResponder(room, talker, this.config.bot.name, this.logger);
     await this.router.handleMessage(incoming, responder);
   }
 
@@ -188,7 +226,8 @@ class WechatyResponder implements BotResponder {
   constructor(
     private readonly room: WechatyRoom,
     private readonly talker: any,
-    private readonly botName: string
+    private readonly botName: string,
+    private readonly logger: Logger
   ) {}
 
   async replyText(text: string): Promise<void> {
@@ -197,11 +236,15 @@ class WechatyResponder implements BotResponder {
   }
 
   async replyFile(filePath: string, displayName?: string): Promise<void> {
-    await this.room.say(FileBox.fromFile(filePath, displayName));
+    const fileBox = FileBox.fromFile(filePath, displayName);
+    await this.room.say(fileBox);
+    this.logger.info({ fileName: fileBox.name }, 'wechat file attachment sent');
   }
 
   async replyImage(filePath: string, displayName?: string): Promise<void> {
-    await this.room.say(FileBox.fromFile(filePath, displayName));
+    const fileBox = FileBox.fromFile(filePath, displayName);
+    await this.room.say(fileBox);
+    this.logger.info({ fileName: fileBox.name }, 'wechat image attachment sent');
   }
 }
 
