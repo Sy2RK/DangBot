@@ -48,6 +48,90 @@ const configSchema = z.object({
     level: z.string().default('info'),
     file: z.string().default('logs/dangbot.log')
   }),
+  agent: z
+    .object({
+      backend: z.enum(['legacy', 'hermes']).default('legacy'),
+      hermes: z
+        .object({
+          baseURL: z.string().url().default('http://127.0.0.1:18642'),
+          apiKey: z.string().default(''),
+          sessionSecret: z.string().default(''),
+          model: z.string().min(1).default('deepseek-v4-flash'),
+          requestTimeoutMs: z.number().int().positive().default(300_000),
+          pollIntervalMs: z.number().int().min(100).default(1_000),
+          maxConcurrentRuns: z.number().int().min(1).max(8).default(2)
+        })
+        .default({
+          baseURL: 'http://127.0.0.1:18642',
+          apiKey: '',
+          sessionSecret: '',
+          model: 'deepseek-v4-flash',
+          requestTimeoutMs: 300_000,
+          pollIntervalMs: 1_000,
+          maxConcurrentRuns: 2
+        }),
+      mcp: z
+        .object({
+          enabled: booleanishSchema.default(true),
+          host: z.string().default('127.0.0.1'),
+          port: z.number().int().min(1).max(65_535).default(18_643),
+          apiKey: z.string().default(''),
+          contextTtlMs: z
+            .number()
+            .int()
+            .positive()
+            .default(10 * 60 * 1_000)
+        })
+        .default({
+          enabled: true,
+          host: '127.0.0.1',
+          port: 18_643,
+          apiKey: '',
+          contextTtlMs: 10 * 60 * 1_000
+        }),
+      sandbox: z
+        .object({
+          enabled: booleanishSchema.default(true),
+          maxExecutionMs: z.number().int().min(100).max(10_000).default(2_000),
+          memoryLimitBytes: z
+            .number()
+            .int()
+            .min(8 * 1024 * 1024)
+            .default(64 * 1024 * 1024),
+          maxOutputChars: z.number().int().positive().default(8_000)
+        })
+        .default({
+          enabled: true,
+          maxExecutionMs: 2_000,
+          memoryLimitBytes: 64 * 1024 * 1024,
+          maxOutputChars: 8_000
+        })
+    })
+    .default({
+      backend: 'legacy',
+      hermes: {
+        baseURL: 'http://127.0.0.1:18642',
+        apiKey: '',
+        sessionSecret: '',
+        model: 'deepseek-v4-flash',
+        requestTimeoutMs: 300_000,
+        pollIntervalMs: 1_000,
+        maxConcurrentRuns: 2
+      },
+      mcp: {
+        enabled: true,
+        host: '127.0.0.1',
+        port: 18_643,
+        apiKey: '',
+        contextTtlMs: 10 * 60 * 1_000
+      },
+      sandbox: {
+        enabled: true,
+        maxExecutionMs: 2_000,
+        memoryLimitBytes: 64 * 1024 * 1024,
+        maxOutputChars: 8_000
+      }
+    }),
   llm: z.object({
     baseURL: z.string().url().default('https://api.openai.com/v1'),
     apiKey: z.string().default(''),

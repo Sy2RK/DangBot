@@ -7,6 +7,21 @@
 3. 配置 `OPENAI_API_KEY`，或在 `config/local.yaml` 中填写 OpenAI-compatible `llm.apiKey`、`baseURL` 和模型名。
 4. 如需语音文件，启用豆包 `llm.tts`；资源 ID 使用 `seed-tts-2.0`，音色使用 `zh_male_tiancaitongsheng_uranus_bigtts`。
 5. 运行 `pnpm install`。如果 pnpm 提示忽略构建脚本，确认 `package.json` 的 `pnpm.onlyBuiltDependencies` 后重新安装。
+6. 验收 Hermes 模式时，先按 `docs/hermes-backend.md` 完成隔离运行时、MCP 和模拟事件验证；不得先连接真实群试错。
+
+## Hermes 后端与隔离
+
+1. `agent.backend: legacy` 时启动 DangBot，并配置 MCP 密钥；确认 `127.0.0.1:18643/health` 未带 Bearer 返回 401、带正确 Bearer 返回 200。
+2. 专属 Hermes 的 `HERMES_HOME` 必须位于项目 `.runtime/hermes/home`，API 必须只监听 `127.0.0.1:18642`，launchd 标签必须是 `com.sy2rk.dangbot-hermes`。
+3. 切换前后记录现有 `ai.hermes.gateway` 的 PID、launchd 状态、配置文件哈希和会话目录清单；四项必须一致。
+4. 两个不同群或不同用户发出相同请求时，Hermes session ID 和 session key 哈希必须不同，且不得包含原始群 ID 或用户 ID。
+5. 伪造、过期、已撤销的 `contextId` 必须失败；当前任务不得列出其他任务或其他用户的附件与记忆。
+6. MCP 结果 JSON 只允许 `status`、`summary`、`artifactIds`、`data`，不得出现 `/Users/`、`/home/`、临时目录或 Windows 绝对路径。
+7. QuickJS 中 `process`、`require`、`fetch`、`XMLHttpRequest` 必须不可用；无限循环必须超时，取消任务后仍在执行的计算必须中止。
+8. 浏览器必须使用专属安装和临时未登录会话，不得读取用户 Chrome 配置、Cookie 或当前 Hermes 浏览器状态。
+9. Hermes 工具列表不得包含 terminal、宿主机文件读写/补丁、Computer Use、插件或技能安装、Home Assistant、消息代发和全局记忆。
+10. SSE 中断后应轮询恢复状态；等待审批时管理员只能选择本次同意或拒绝，取消时应调用 Hermes `/stop` 并撤销 MCP 权限。
+11. DeepSeek `deepseek-v4-flash` 必须是每次 run 的规划模型；图片和视频分析的工具调用记录必须显示 `qwen/qwen3.7-plus`。
 
 ## 基础验收
 
@@ -50,10 +65,10 @@
 
 1. 发送 `@DangBot 记住 我喜欢简短回答`，机器人应确认已记住。
 2. 发送 `@DangBot 我的记忆`，机器人应列出刚才的个人持久记忆。
-3. 发送 `@DangBot 全局记住 默认用中文回答`，机器人应确认已写入全局记忆。
-4. 发送 `@DangBot 全局记忆`，机器人应列出全局记忆。
-5. 连续对话达到 32 条或停止 1 小时后，机器人应在后台自动沉淀个人持久记忆，不应在群里额外提示。
-6. 每天北京时间 00:00 后，机器人应在后台刷新全局持久记忆。
+3. 发送 `@DangBot 全局记住 默认用中文回答`，机器人应确认已写入当前群共享记忆；另一个群不得读取到它。
+4. 发送 `@DangBot 全局记忆`，机器人应只列出当前群共享记忆。
+5. `legacy` 模式下，连续对话达到 32 条或停止 1 小时后，机器人应在后台自动沉淀个人持久记忆；Hermes 模式不得执行这项自动归纳。
+6. `legacy` 模式每天北京时间 00:00 后会逐群刷新共享记忆；Hermes 模式只允许读取用户主动保存、且按群和用户隔离的记忆。
 7. 用户 A 与机器人完成一次公开问答后，用户 B 再追问“刚才他说的方案”，机器人应能参考近期群级上下文。
 8. 用户发送 `@DangBot 清空上下文` 只应清理自己的个人上下文；用户发送 `@DangBot 清空群上下文` 才清理本群公共上下文。
 

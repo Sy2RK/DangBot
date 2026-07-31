@@ -12,6 +12,28 @@ storage:
 logging:
   level: info
   file: logs/dangbot.log
+agent:
+  # Switch to hermes only after the dedicated service and MCP health checks pass.
+  backend: ${DANGBOT_AGENT_BACKEND:-legacy}
+  hermes:
+    baseURL: ${DANGBOT_HERMES_BASE_URL:-http://127.0.0.1:18642}
+    apiKey: ${DANGBOT_HERMES_API_KEY:-}
+    sessionSecret: ${DANGBOT_HERMES_SESSION_SECRET:-}
+    model: ${DANGBOT_HERMES_MODEL:-deepseek-v4-flash}
+    requestTimeoutMs: 300000
+    pollIntervalMs: 1000
+    maxConcurrentRuns: 2
+  mcp:
+    enabled: true
+    host: 127.0.0.1
+    port: 18643
+    apiKey: ${DANGBOT_MCP_API_KEY:-}
+    contextTtlMs: 600000
+  sandbox:
+    enabled: true
+    maxExecutionMs: 2000
+    memoryLimitBytes: 67108864
+    maxOutputChars: 8000
 llm:
   baseURL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
   apiKey: ${OPENAI_API_KEY:-}

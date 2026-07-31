@@ -6,7 +6,12 @@ import { MemoryConsolidationService } from './domain/memoryConsolidation.js';
 import { TaskQueue } from './domain/taskQueue.js';
 import { createLogger } from './logger.js';
 import { FileService } from './services/files/fileService.js';
+import { ArtifactBroker } from './services/artifacts/artifactBroker.js';
+import { HermesBackendClient } from './services/hermes/hermesBackendClient.js';
+import { HermesTaskExecutor } from './services/hermes/hermesTaskExecutor.js';
 import { OpenAICompatibleClient } from './services/llm/openaiCompatibleClient.js';
+import { DangBotMcpServer } from './services/mcp/dangbotMcpServer.js';
+import { PortableCodeSandbox } from './services/sandbox/portableCodeSandbox.js';
 import { BraveSearchClient } from './services/search/braveSearchClient.js';
 import { AppDatabase } from './storage/database.js';
 import { loadSoulPrompt } from './soul.js';
@@ -30,13 +35,48 @@ async function main(): Promise<void> {
   const systemPrompt = await loadSoulPrompt();
   const llm = new OpenAICompatibleClient(config.llm, config.storage.outputsDir, systemPrompt);
   const webSearch = new BraveSearchClient(config.search);
+  const artifactBroker = new ArtifactBroker(config, db);
+  const hermesClient = new HermesBackendClient(config.agent.hermes);
+  const portableSandbox = new PortableCodeSandbox(config.agent.sandbox);
+  const mcpServer = new DangBotMcpServer(
+    config,
+    db,
+    llm,
+    fileService,
+    artifactBroker,
+    portableSandbox,
+    logger,
+    systemPrompt,
+    webSearch
+  );
+  const hermesExecutor = new HermesTaskExecutor(
+    config,
+    db,
+    hermesClient,
+    artifactBroker,
+    logger,
+    systemPrompt,
+    (taskId) => mcpServer.cancelTask(taskId)
+  );
   const queue = new TaskQueue(db, logger, {
     maxConcurrentTasks: config.limits.maxConcurrentTasks,
     maxConcurrentLongTasks: config.limits.maxConcurrentLongTasks,
     taskTimeoutMs: config.limits.taskTimeoutMs
   });
   const memoryConsolidation = new MemoryConsolidationService(config, db, llm, logger);
-  memoryConsolidation.start();
+  if (config.agent.backend === 'legacy') memoryConsolidation.start();
+  if (mcpServer.configured()) await mcpServer.start();
+  if (config.agent.backend === 'hermes') {
+    if (config.agent.hermes.maxConcurrentRuns > config.limits.maxConcurrentTasks) {
+      throw new Error('Hermes 并发不能高于 DangBot 任务队列并发。');
+    }
+    if (!hermesExecutor.configured()) {
+      throw new Error('agent.backend=hermes，但独立 Hermes API 或会话密钥未配置。');
+    }
+    if (!mcpServer.configured()) {
+      throw new Error('agent.backend=hermes，但 DangBot MCP 未安全配置。');
+    }
+  }
   const router = new BotRequestRouter(
     config,
     db,
@@ -46,7 +86,8 @@ async function main(): Promise<void> {
     logger,
     systemPrompt,
     memoryConsolidation,
-    webSearch
+    webSearch,
+    hermesExecutor
   );
   const adapter = new WechatyAdapter(config, router, logger);
   const automationScheduler = new AutomationScheduler(
@@ -68,6 +109,7 @@ async function main(): Promise<void> {
     automationScheduler.stop();
     memoryConsolidation.stop();
     await adapter.stop();
+    await mcpServer.stop();
     db.close();
     process.exit(0);
   };
@@ -80,6 +122,9 @@ async function main(): Promise<void> {
       botName: config.bot.name,
       puppet: process.env.WECHATY_PUPPET ?? config.wechat.puppet,
       sqlitePath: config.storage.sqlitePath,
+      agentBackend: config.agent.backend,
+      hermesConfigured: hermesExecutor.configured(),
+      mcpConfigured: mcpServer.configured(),
       llmConfigured: llm.configured(),
       webSearchConfigured:
         config.search.enabled &&

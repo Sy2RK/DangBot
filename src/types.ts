@@ -8,6 +8,19 @@ export type TaskStatus =
 
 export type UserRole = 'member' | 'group_admin' | 'system_admin';
 
+export type AgentBackendMode = 'legacy' | 'hermes';
+
+export type HermesRunStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_for_approval'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'stopping';
+
+export type ArtifactKind = 'file' | 'image' | 'audio' | 'video';
+
 export type ResultKind = 'text' | 'image' | 'file';
 
 export type AttachmentKind = 'file' | 'image' | 'video';
@@ -70,6 +83,31 @@ export interface AppConfig {
   logging: {
     level: string;
     file: string;
+  };
+  agent: {
+    backend: AgentBackendMode;
+    hermes: {
+      baseURL: string;
+      apiKey: string;
+      sessionSecret: string;
+      model: string;
+      requestTimeoutMs: number;
+      pollIntervalMs: number;
+      maxConcurrentRuns: number;
+    };
+    mcp: {
+      enabled: boolean;
+      host: string;
+      port: number;
+      apiKey: string;
+      contextTtlMs: number;
+    };
+    sandbox: {
+      enabled: boolean;
+      maxExecutionMs: number;
+      memoryLimitBytes: number;
+      maxOutputChars: number;
+    };
   };
   llm: {
     baseURL: string;
@@ -307,4 +345,43 @@ export interface RoomState {
   enabled: boolean;
   admins: string[];
   authorized: boolean;
+}
+
+export interface HermesRunRecord {
+  taskId: string;
+  runId: string;
+  sessionId: string;
+  sessionKeyHash: string;
+  contextIdHash: string;
+  status: HermesRunStatus;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpContextRecord {
+  tokenHash: string;
+  taskId: string;
+  roomId: string;
+  userId: string;
+  role: UserRole;
+  attachmentIds: string[];
+  expiresAt: string;
+  revokedAt?: string;
+  createdAt: string;
+}
+
+export interface ArtifactRecord {
+  id: string;
+  taskId: string;
+  runId?: string;
+  kind: ArtifactKind;
+  filePath: string;
+  displayName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+  expiresAt: string;
+  deliveredAt?: string;
 }

@@ -1,6 +1,6 @@
 # DangBot
 
-DangBot is a TypeScript MVP for a WeChat group agent bot. It uses Wechaty as a replaceable WeChat adapter, SQLite for local persistence, and an OpenAI-compatible API for text, image, and video understanding plus image/video generation.
+DangBot is a TypeScript WeChat group agent bot. Wechaty/wechat4u remains the group transport and policy edge. The agent backend is switchable: `legacy` keeps the original Node loop for emergency rollback, while `hermes` sends all planning and tool orchestration to a dedicated, isolated Hermes Agent and keeps attachments, approval, delivery, scheduling, and scoped memory in DangBot.
 
 ## Quick start
 
@@ -14,6 +14,29 @@ Fill `config/local.yaml` before running against a real WeChat account. The bot o
 
 Sensitive local files are ignored by git: `config/local.yaml`, `data/`, `logs/`, and Wechaty memory-card files.
 
+## Dedicated Hermes backend
+
+The dedicated instance is pinned to `hermes-agent==0.19.0`, listens on `127.0.0.1:18642`, and talks to the loopback-only DangBot MCP service on `127.0.0.1:18643`. Its complete runtime lives under ignored `.runtime/hermes/`; it never reads or modifies `~/.hermes`, and its launcher does not use Hermes profile commands or `--replace`.
+
+```bash
+# Create the isolated Python environment and config.
+pnpm hermes:bootstrap
+
+# Isolated, logged-out agent-browser runtime. It may reuse only a locally
+# installed browser executable; profiles, cookies and sessions stay temporary.
+pnpm hermes:bootstrap:browser
+
+# Optional: download a separate Chrome for Testing binary instead.
+pnpm hermes:bootstrap:browser-download
+
+# After filling .runtime/hermes/service.env with dedicated credentials:
+pnpm hermes:run
+```
+
+Set `DANGBOT_MCP_API_KEY` while DangBot is still on `legacy` to start MCP for offline verification. Only after both health checks and simulated events pass, set `DANGBOT_HERMES_API_KEY`, `DANGBOT_HERMES_SESSION_SECRET`, and `DANGBOT_AGENT_BACKEND=hermes`, then restart DangBot. DeepSeek `deepseek-v4-flash` is always the planner in this mode; Qwen `qwen/qwen3.7-plus` remains the file/image/video understanding model behind DangBot MCP.
+
+There is no container runtime dependency. Safe code execution is pure JavaScript in a bounded QuickJS-WASM runtime with no shell, host filesystem, `process`, `require`, or network API. Browser automation uses the dedicated Hermes browser installation and an ephemeral, logged-out session; it never uses the user's Chrome profile or cookies. See [the Hermes operations runbook](docs/hermes-backend.md) for validation, launchd, cutover, and rollback.
+
 ## Commands in a WeChat group
 
 All commands must mention the bot, for example `@DangBot 状态`.
@@ -22,7 +45,7 @@ All commands must mention the bot, for example `@DangBot 状态`.
 - `/health` / `自检`: run a local self-check and report each capability in DangBot's cat voice.
 - `清空上下文`: clear the caller's context.
 - `记住 ...`: add a persistent memory for the caller in this room.
-- `全局记住 ...`: add a persistent global memory used for all callers.
+- `全局记住 ...`: add a persistent room-shared memory for callers in the current room. The legacy command name remains for compatibility; it never crosses rooms.
 - `我的记忆` / `全局记忆`: show persistent memories.
 - `清空我的记忆` / `清空全局记忆`: clear persistent memories.
 - `提醒我 10分钟后 喝水` / `设置提醒 10分钟后 喝水` / `提醒我每天 09:00 喝水`: create a reminder. Creating, pausing, resuming, and deleting automations require a group admin or system admin when admins are configured; adminless rooms allow normal members to manage them.
@@ -49,19 +72,20 @@ All commands must mention the bot, for example `@DangBot 状态`.
 
 - `CAPABILITIES.md` is Xiao Dang's local self-capability memory. It is loaded into the system prompt at startup, stays separate from user/global memories, and cannot be cleared by chat commands.
 - Every user-facing feature change must update `CAPABILITIES.md` in the same change so the bot can describe what it can and cannot do accurately in its cat voice.
-- Short-term personal context keeps the latest 32 user/assistant messages.
+- In `legacy` mode, short-term personal context keeps the latest 32 user/assistant messages.
 - Short-term room context keeps the latest 160 public room messages, including normal group chat, mentioned requests, and DangBot task replies.
 - Normal replies keep personal context isolated, but also receive a small recent room-context window so the bot can follow shared group references.
-- When a personal context reaches the limit, DangBot quietly consolidates it into persistent personal memory.
-- If a personal conversation is idle for one hour, DangBot quietly consolidates it into persistent personal memory.
-- Global persistent memory is refreshed once per day at 00:00 Beijing time.
+- Automatic context consolidation only runs in `legacy` mode. The Hermes backend starts new opaque sessions and only receives memories explicitly saved in the current room/user scope; Hermes global memory is disabled.
+- The commands named `全局记住` and `全局记忆` now mean “shared in this room”. Existing legacy rows stored with the old cross-room `*` scope are intentionally not imported into Hermes.
 
 Manual memories are stored separately from automatic summaries, so explicit `记住 ...` entries are not overwritten by the background consolidation job.
 
 ## Tools, Policy, And Automations
 
 - Built-in tool calls such as web search, file analysis, image/video analysis, and image/video generation are registered in a tool registry and recorded in SQLite.
-- Tool-backed requests run through a bounded main-model loop. Each step can call one registered tool, observe its validated result, and choose the next tool. Duplicate calls, unavailable tools, policy violations, and the configured step/timeout limits stop the loop.
+- In `legacy` mode, tool-backed requests run through the original bounded Node loop. In `hermes` mode, the Node loop is bypassed: Hermes plans the task and calls only the explicitly allowlisted built-in web/browser tools and DangBot MCP tools.
+- MCP capabilities are random, task-scoped, short-lived, and revoked on completion or cancellation. Tool responses expose only status, a bounded summary, logical artifact IDs, and sanitized data; they never expose host paths.
+- Generated files are realpath-, MIME-, size-, and SHA-256-checked by the artifact broker before Wechaty sends a real attachment.
 - `text.prepare` supports deterministic start/end markers so later tools receive only the intended text instead of titles, instructions, citations, or adjacent content.
 - Speech synthesis is registered as `voice.generate`; the generated MP3 uses the normal `file` result kind.
 - Whether a request should invoke speech synthesis is decided by the main LLM intent classifier. Local text matching only strips explicit command wording and blocks narrow unresolved-title placeholders; it does not classify general sentences by suffix.
@@ -76,6 +100,8 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm build
+pnpm audit --prod
+git diff --check
 pnpm verify:voice-agent
 ```
 
@@ -89,5 +115,7 @@ pnpm verify:voice-agent
 - Search prompts include the current Beijing date/time and add a date anchor for time-sensitive queries, so relative phrases such as “today” and “this week” are interpreted against the current Beijing date.
 - `pnpm audit --prod` is expected to pass. The project pins safe overrides and small local compatibility shims for legacy transitive packages in the Wechaty/FileBox chains; revisit these shims when upstream packages publish maintained replacements.
 - Different Wechaty puppet providers have different reliability and platform constraints. Keep the adapter boundary intact when switching providers.
+- Hermes mode never enables host terminal, host file editing, Computer Use, plugin/skill installation, Home Assistant, or arbitrary message sending. Administrators can approve a high-risk operation once or deny it; there is no permanent authorization.
+- `AutomationScheduler` stays in Node and dispatches due work through the selected backend so asynchronous results can still be delivered to the correct WeChat room.
 - Doubao TTS uses `DOUBAO_TTS_API_KEY`, resource ID `seed-tts-2.0`, and defaults to speaker `zh_male_tiancaitongsheng_uranus_bigtts`. The API key belongs in ignored local configuration or the environment, never in a tracked file.
 - `config/local.yaml`, `data/`, `logs/`, and `*.memory-card.json` are intentionally ignored by git.

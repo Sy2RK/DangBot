@@ -57,60 +57,59 @@ export class MemoryConsolidationService {
     this.globalJobRunning = true;
 
     try {
-      const roomSections = this.db
-        .listAuthorizedRooms()
-        .filter((room) => room.enabled)
-        .map((room) => {
-          const context = this.db.getContext({
-            scope: 'room',
-            roomId: room.id,
-            limit: this.config.limits.publicContextMessagesPerRoom
-          });
-          if (context.length === 0) return '';
-          return [`# ${room.topic ?? room.id}`, ...context.map((turn) => turn.content)].join('\n');
-        })
-        .filter(Boolean);
+      const rooms = this.db.listAuthorizedRooms().filter((room) => room.enabled);
 
-      if (roomSections.length === 0) return;
-
-      const existing = this.db.listMemories({
-        scope: 'global',
-        roomId: '*',
-        limit: this.config.limits.globalMemoryEntries
-      });
-
-      const content = await this.llm.chat([
-        {
-          role: 'system',
-          content:
-            '你是长期记忆整理器。请把微信群公共上下文沉淀成全局持久记忆，只保留对所有用户长期有用的事实、偏好、群规则和稳定背景。不要记录敏感隐私、一次性闲聊、短期任务细节或未经确认的信息。输出中文纯文本，最多 10 条，用“1、2、3、”编号；没有可更新内容时输出“无需更新”。'
-        },
-        {
-          role: 'user',
-          content: [
-            `触发原因：${reason}`,
-            `现有全局记忆：\n${formatExistingMemories(existing)}`,
-            `群聊上下文：\n${roomSections.join('\n\n')}`
-          ].join('\n\n')
-        }
-      ]);
-
-      const normalized = normalizeGeneratedMemory(content);
-      if (!normalized) return;
-
-      const memory = this.db.upsertMemory({
-        scope: 'global',
-        roomId: '*',
-        source: autoGlobalMemorySource,
-        content: normalized
-      });
-      this.db.addAudit({ action: 'global_memory_auto_consolidated', details: { memoryId: memory.id, reason } });
+      for (const room of rooms) {
+        const context = this.db.getContext({
+          scope: 'room',
+          roomId: room.id,
+          limit: this.config.limits.publicContextMessagesPerRoom
+        });
+        if (context.length === 0) continue;
+        const existing = this.db.listMemories({
+          scope: 'global',
+          roomId: room.id,
+          limit: this.config.limits.globalMemoryEntries
+        });
+        const content = await this.llm.chat([
+          {
+            role: 'system',
+            content:
+              '你是长期记忆整理器。请把当前微信群公共上下文沉淀成本群共享持久记忆，只保留对本群成员长期有用的事实、偏好、群规则和稳定背景。不要记录敏感隐私、一次性闲聊、短期任务细节或未经确认的信息，也不要推断其他群的信息。输出中文纯文本，最多 10 条，用“1、2、3、”编号；没有可更新内容时输出“无需更新”。'
+          },
+          {
+            role: 'user',
+            content: [
+              `触发原因：${reason}`,
+              `现有本群共享记忆：\n${formatExistingMemories(existing)}`,
+              `本群上下文：\n${context.map((turn) => turn.content).join('\n')}`
+            ].join('\n\n')
+          }
+        ]);
+        const normalized = normalizeGeneratedMemory(content);
+        if (!normalized) continue;
+        const memory = this.db.upsertMemory({
+          scope: 'global',
+          roomId: room.id,
+          source: autoGlobalMemorySource,
+          content: normalized
+        });
+        this.db.addAudit({
+          roomId: room.id,
+          action: 'global_memory_auto_consolidated',
+          details: { memoryId: memory.id, reason }
+        });
+      }
     } finally {
       this.globalJobRunning = false;
     }
   }
 
-  private async consolidateUserMemory(roomId: string, userId: string, reason: string): Promise<void> {
+  private async consolidateUserMemory(
+    roomId: string,
+    userId: string,
+    reason: string
+  ): Promise<void> {
     const key = `${roomId}:${userId}`;
     if (this.runningUserJobs.has(key) || !this.llm.configured()) return;
     this.runningUserJobs.add(key);
@@ -170,7 +169,12 @@ export class MemoryConsolidationService {
         keep: this.config.limits.memoryConsolidationKeepContextMessages
       });
       if (removed > 0) {
-        this.db.addAudit({ roomId, userId, action: 'user_context_auto_trimmed', details: { removed, reason } });
+        this.db.addAudit({
+          roomId,
+          userId,
+          action: 'user_context_auto_trimmed',
+          details: { removed, reason }
+        });
       }
     } finally {
       this.runningUserJobs.delete(key);
@@ -184,7 +188,9 @@ export class MemoryConsolidationService {
       userId,
       source: autoUserMemorySource
     });
-    return !autoMemory || new Date(autoMemory.updatedAt).getTime() < new Date(lastCreatedAt).getTime();
+    return (
+      !autoMemory || new Date(autoMemory.updatedAt).getTime() < new Date(lastCreatedAt).getTime()
+    );
   }
 
   private scheduleNextGlobalRun(): void {

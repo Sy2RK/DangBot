@@ -32,6 +32,31 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       level: 'silent',
       file: path.join(dir, 'dangbot.log')
     },
+    agent: {
+      backend: 'legacy',
+      hermes: {
+        baseURL: 'http://127.0.0.1:18642',
+        apiKey: '',
+        sessionSecret: 'test-session-secret-that-is-not-used-outside-tests',
+        model: 'deepseek-v4-flash',
+        requestTimeoutMs: 5_000,
+        pollIntervalMs: 10,
+        maxConcurrentRuns: 2
+      },
+      mcp: {
+        enabled: true,
+        host: '127.0.0.1',
+        port: 18_643,
+        apiKey: 'test-mcp-key-32-characters-minimum',
+        contextTtlMs: 60_000
+      },
+      sandbox: {
+        enabled: true,
+        maxExecutionMs: 500,
+        memoryLimitBytes: 16 * 1024 * 1024,
+        maxOutputChars: 2_000
+      }
+    },
     llm: {
       baseURL: 'https://example.test/v1',
       apiKey: '',
@@ -125,6 +150,13 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
     wechat: { ...base.wechat, ...overrides.wechat },
     storage: { ...base.storage, ...overrides.storage },
     logging: { ...base.logging, ...overrides.logging },
+    agent: {
+      ...base.agent,
+      ...overrides.agent,
+      hermes: { ...base.agent.hermes, ...overrides.agent?.hermes },
+      mcp: { ...base.agent.mcp, ...overrides.agent?.mcp },
+      sandbox: { ...base.agent.sandbox, ...overrides.agent?.sandbox }
+    },
     llm: {
       ...base.llm,
       ...overrides.llm,

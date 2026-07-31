@@ -17,11 +17,11 @@ export const replyPhrases = {
   userContextCleared: '你的个人上下文清掉啦。',
   roomContextCleared: '本群公共上下文清掉啦。',
   askMemoryContent: '想让我记住什么呀，喵？',
-  askGlobalMemoryContent: '想让我全局记住什么呀，喵？',
+  askGlobalMemoryContent: '想让我在本群共享记住什么呀，喵？',
   memorySaved: '记住啦，喵。',
-  globalMemorySaved: '全局记住啦，喵。',
+  globalMemorySaved: '已经记进本群共享记忆啦，喵。',
   userMemoryCleared: '你的持久记忆清掉啦。',
-  globalMemoryCleared: '全局持久记忆清掉啦。',
+  globalMemoryCleared: '本群共享持久记忆清掉啦。',
   noTaskToCancel: '我没找到可取消的任务。',
   taskCancelled: '已取消。',
   noApprovalTask: '我没找到正在等审批的任务。',
@@ -38,7 +38,8 @@ export const replyPhrases = {
   operationUnavailable: '这个操作现在还不开放。',
   voiceFileGenerating: '好哒，我这就念给你听，喵～',
   progressReceived: '收到，我先扒拉一下。',
-  progressFallbackPlan: '我打算先看清楚你要什么，再把材料和上下文捋一遍，最后给你一个能直接用的结果。',
+  progressFallbackPlan:
+    '我打算先看清楚你要什么，再把材料和上下文捋一遍，最后给你一个能直接用的结果。',
   progressStage: (detail: string) => `这一步处理完啦：${detail}`,
   progressDoneText: '完成啦，结果在下面。',
   progressDoneFile: '完成啦，结果文件发你。',
@@ -49,9 +50,7 @@ export function normalizeOutgoingText(text: string): string {
   const normalized = redactLocalPaths(text).replace(/\r\n/g, '\n').trim();
   if (!normalized) return '';
 
-  const withoutFences = normalized
-    .replace(/^```[^\n]*\n?/gm, '')
-    .replace(/^~~~[^\n]*\n?/gm, '');
+  const withoutFences = normalized.replace(/^```[^\n]*\n?/gm, '').replace(/^~~~[^\n]*\n?/gm, '');
   const withoutTables = normalizeTableLines(withoutFences);
   const lines = withoutTables.split('\n');
   const output: string[] = [];
@@ -103,7 +102,10 @@ export function normalizeOutgoingText(text: string): string {
     bulletIndex = 1;
   }
 
-  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return output
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 export function redactLocalPaths(text: string): string {

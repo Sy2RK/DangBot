@@ -10,6 +10,12 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "hermes:bootstrap": "node scripts/hermes/bootstrap-runtime.mjs",
+    "hermes:bootstrap:browser": "node scripts/hermes/bootstrap-runtime.mjs --with-browser",
+    "hermes:bootstrap:browser-download": "node scripts/hermes/bootstrap-runtime.mjs --with-browser --download-browser",
+    "hermes:run": "node scripts/hermes/run-dedicated.mjs",
+    "hermes:install:launchd": "node scripts/hermes/install-launchd.mjs",
+    "hermes:preflight:offline": "tsx scripts/hermes/offline-preflight.ts",
     "verify:voice-agent": "tsx scripts/verify-multistep-voice.ts",
     "lint": "eslint src tests scripts",
     "format": "prettier --write .",
@@ -19,6 +25,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "better-sqlite3": "^12.10.0",
     "docx": "9.7.1",
     "exceljs": "^4.4.0",
@@ -28,6 +35,7 @@
     "nanoid": "^5.1.6",
     "pdf-parse": "^2.4.5",
     "pino": "^10.1.0",
+    "quickjs-emscripten": "0.32.0",
     "wechaty": "^1.20.2",
     "wechaty-puppet-wechat4u": "^1.14.14",
     "yaml": "^2.8.1",

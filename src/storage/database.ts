@@ -1,5 +1,5 @@
 import DatabaseConstructor, { type Database } from 'better-sqlite3';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type {
   AppConfig,
   AttachmentRecord,
@@ -20,7 +20,12 @@ import type {
   AutomationKind,
   AutomationRecord,
   AutomationScheduleType,
-  AutomationStatus
+  AutomationStatus,
+  ArtifactKind,
+  ArtifactRecord,
+  HermesRunRecord,
+  HermesRunStatus,
+  McpContextRecord
 } from '../types.js';
 import { ensureParentDir } from '../utils/fs.js';
 import { nowIso } from '../utils/time.js';
@@ -191,6 +196,56 @@ export class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_tool_calls_task ON tool_calls(task_id, created_at);
 
+      CREATE TABLE IF NOT EXISTS hermes_runs (
+        task_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE,
+        session_id TEXT NOT NULL,
+        session_key_hash TEXT NOT NULL,
+        context_id_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_hermes_runs_status ON hermes_runs(status, updated_at);
+
+      CREATE TABLE IF NOT EXISTS mcp_contexts (
+        token_hash TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        attachment_ids_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_mcp_contexts_expiry ON mcp_contexts(expires_at, revoked_at);
+
+      CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        run_id TEXT,
+        kind TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        delivered_at TEXT,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_run_hash
+        ON artifacts(run_id, sha256) WHERE run_id IS NOT NULL;
+
       CREATE TABLE IF NOT EXISTS automations (
         id TEXT PRIMARY KEY,
         room_id TEXT NOT NULL,
@@ -301,7 +356,8 @@ export class AppDatabase {
 
   upsertConfiguredRoom(roomConfig: RoomConfig): RoomState {
     const now = nowIso();
-    const roomId = roomConfig.stableId ?? roomConfig.id ?? `topic:${roomConfig.topic ?? randomUUID()}`;
+    const roomId =
+      roomConfig.stableId ?? roomConfig.id ?? `topic:${roomConfig.topic ?? randomUUID()}`;
     this.db
       .prepare(
         `
@@ -745,11 +801,7 @@ export class AppDatabase {
     return rows.map(normalizeTask);
   }
 
-  listRecentCompletedRoomTextTasks(
-    roomId: string,
-    excludeTaskId: string,
-    limit = 8
-  ): TaskRecord[] {
+  listRecentCompletedRoomTextTasks(roomId: string, excludeTaskId: string, limit = 8): TaskRecord[] {
     const rows = this.db
       .prepare(
         `
@@ -786,7 +838,10 @@ export class AppDatabase {
           id, task_id, room_id, requester_id, risk_type, status, reason,
           tool_name, tool_input_json, policy_reason, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (
+          SELECT 1 FROM approvals WHERE task_id = ? AND status = 'pending'
+        )
       `
       )
       .run(
@@ -800,7 +855,8 @@ export class AppDatabase {
         input.toolInputJson,
         input.policyReason,
         now,
-        now
+        now,
+        input.taskId
       );
   }
 
@@ -890,6 +946,222 @@ export class AppDatabase {
       .prepare('SELECT * FROM tool_calls WHERE task_id = ? ORDER BY created_at')
       .all(taskId) as DbToolCall[];
     return rows.map(normalizeToolCall);
+  }
+
+  createMcpContext(input: {
+    taskId: string;
+    roomId: string;
+    userId: string;
+    role: UserRole;
+    attachmentIds: string[];
+    ttlMs: number;
+  }): { token: string; record: McpContextRecord } {
+    const token = randomBytes(32).toString('base64url');
+    const tokenHash = hashCapabilityToken(token);
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + input.ttlMs).toISOString();
+    this.db
+      .prepare(
+        `
+        INSERT INTO mcp_contexts (
+          token_hash, task_id, room_id, user_id, role, attachment_ids_json,
+          expires_at, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          token_hash = excluded.token_hash,
+          room_id = excluded.room_id,
+          user_id = excluded.user_id,
+          role = excluded.role,
+          attachment_ids_json = excluded.attachment_ids_json,
+          expires_at = excluded.expires_at,
+          revoked_at = NULL,
+          created_at = excluded.created_at
+      `
+      )
+      .run(
+        tokenHash,
+        input.taskId,
+        input.roomId,
+        input.userId,
+        input.role,
+        JSON.stringify([...new Set(input.attachmentIds)]),
+        expiresAt,
+        createdAt
+      );
+    return { token, record: this.getMcpContextByHash(tokenHash)! };
+  }
+
+  resolveMcpContext(token: string): McpContextRecord | undefined {
+    if (!token || token.length > 128) return undefined;
+    const record = this.getMcpContextByHash(hashCapabilityToken(token));
+    if (!record || record.revokedAt || record.expiresAt <= nowIso()) return undefined;
+    return record;
+  }
+
+  revokeMcpContext(taskId: string): void {
+    this.db
+      .prepare('UPDATE mcp_contexts SET revoked_at = ? WHERE task_id = ? AND revoked_at IS NULL')
+      .run(nowIso(), taskId);
+  }
+
+  cleanupExpiredMcpContexts(): number {
+    const result = this.db
+      .prepare('DELETE FROM mcp_contexts WHERE expires_at <= ? OR revoked_at IS NOT NULL')
+      .run(nowIso());
+    return result.changes;
+  }
+
+  private getMcpContextByHash(tokenHash: string): McpContextRecord | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM mcp_contexts WHERE token_hash = ?')
+      .get(tokenHash) as DbMcpContext | undefined;
+    return row ? normalizeMcpContext(row) : undefined;
+  }
+
+  upsertHermesRun(input: {
+    taskId: string;
+    runId: string;
+    sessionId: string;
+    sessionKeyHash: string;
+    contextIdHash: string;
+    status: HermesRunStatus;
+  }): HermesRunRecord {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO hermes_runs (
+          task_id, run_id, session_id, session_key_hash, context_id_hash,
+          status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          run_id = excluded.run_id,
+          session_id = excluded.session_id,
+          session_key_hash = excluded.session_key_hash,
+          context_id_hash = excluded.context_id_hash,
+          status = excluded.status,
+          error = NULL,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(
+        input.taskId,
+        input.runId,
+        input.sessionId,
+        input.sessionKeyHash,
+        input.contextIdHash,
+        input.status,
+        now,
+        now
+      );
+    return this.getHermesRunByTask(input.taskId)!;
+  }
+
+  getHermesRunByTask(taskId: string): HermesRunRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM hermes_runs WHERE task_id = ?').get(taskId) as
+      | DbHermesRun
+      | undefined;
+    return row ? normalizeHermesRun(row) : undefined;
+  }
+
+  updateHermesRun(
+    taskId: string,
+    patch: { status: HermesRunStatus; error?: string }
+  ): HermesRunRecord | undefined {
+    this.db
+      .prepare('UPDATE hermes_runs SET status = ?, error = ?, updated_at = ? WHERE task_id = ?')
+      .run(patch.status, patch.error, nowIso(), taskId);
+    return this.getHermesRunByTask(taskId);
+  }
+
+  addArtifact(input: {
+    taskId: string;
+    runId?: string;
+    kind: ArtifactKind;
+    filePath: string;
+    displayName: string;
+    mimeType: string;
+    sizeBytes: number;
+    sha256: string;
+    ttlMs: number;
+  }): ArtifactRecord {
+    if (input.runId) {
+      const existing = this.db
+        .prepare('SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ?')
+        .get(input.runId, input.sha256) as DbArtifact | undefined;
+      if (existing) return normalizeArtifact(existing);
+    }
+    const id = `artifact_${randomUUID().slice(0, 12)}`;
+    const createdAt = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO artifacts (
+          id, task_id, run_id, kind, file_path, display_name, mime_type,
+          size_bytes, sha256, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        id,
+        input.taskId,
+        input.runId,
+        input.kind,
+        input.filePath,
+        input.displayName,
+        input.mimeType,
+        input.sizeBytes,
+        input.sha256,
+        createdAt,
+        new Date(Date.now() + input.ttlMs).toISOString()
+      );
+    return this.getArtifact(id)!;
+  }
+
+  getArtifact(artifactId: string): ArtifactRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as
+      | DbArtifact
+      | undefined;
+    return row ? normalizeArtifact(row) : undefined;
+  }
+
+  listTaskArtifacts(taskId: string): ArtifactRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM artifacts WHERE task_id = ? AND expires_at > ? ORDER BY created_at')
+      .all(taskId, nowIso()) as DbArtifact[];
+    return rows.map(normalizeArtifact);
+  }
+
+  markArtifactDelivered(artifactId: string): void {
+    this.db.prepare('UPDATE artifacts SET delivered_at = ? WHERE id = ?').run(nowIso(), artifactId);
+  }
+
+  listRecentRoomMessages(
+    roomId: string,
+    limit: number
+  ): Array<{ userId: string; text: string; mentioned: boolean; createdAt: string }> {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT user_id, text, mentioned, created_at FROM messages
+        WHERE room_id = ? AND trim(COALESCE(text, '')) <> ''
+        ORDER BY created_at DESC LIMIT ?
+      `
+      )
+      .all(roomId, limit) as Array<{
+      user_id: string;
+      text: string;
+      mentioned: 0 | 1;
+      created_at: string;
+    }>;
+    return rows.reverse().map((row) => ({
+      userId: row.user_id,
+      text: row.text,
+      mentioned: row.mentioned === 1,
+      createdAt: row.created_at
+    }));
   }
 
   resolveApproval(taskId: string, approverId: string, approved: boolean): void {
@@ -1312,8 +1584,48 @@ const roomScopedTables = [
   'automations',
   'contexts',
   'memories',
+  'mcp_contexts',
   'audit_logs'
 ] as const;
+
+interface DbHermesRun {
+  task_id: string;
+  run_id: string;
+  session_id: string;
+  session_key_hash: string;
+  context_id_hash: string;
+  status: HermesRunStatus;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbMcpContext {
+  token_hash: string;
+  task_id: string;
+  room_id: string;
+  user_id: string;
+  role: UserRole;
+  attachment_ids_json: string;
+  expires_at: string;
+  revoked_at?: string | null;
+  created_at: string;
+}
+
+interface DbArtifact {
+  id: string;
+  task_id: string;
+  run_id?: string | null;
+  kind: ArtifactKind;
+  file_path: string;
+  display_name: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+  expires_at: string;
+  delivered_at?: string | null;
+}
 
 interface DbTask {
   id: string;
@@ -1427,6 +1739,63 @@ function normalizeTask(row: DbTask): TaskRecord {
   };
 }
 
+function normalizeHermesRun(row: DbHermesRun): HermesRunRecord {
+  return {
+    taskId: row.task_id,
+    runId: row.run_id,
+    sessionId: row.session_id,
+    sessionKeyHash: row.session_key_hash,
+    contextIdHash: row.context_id_hash,
+    status: row.status,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function normalizeMcpContext(row: DbMcpContext): McpContextRecord {
+  let attachmentIds: string[] = [];
+  try {
+    const parsed = JSON.parse(row.attachment_ids_json) as unknown;
+    if (Array.isArray(parsed))
+      attachmentIds = parsed.filter((value): value is string => typeof value === 'string');
+  } catch {
+    attachmentIds = [];
+  }
+  return {
+    tokenHash: row.token_hash,
+    taskId: row.task_id,
+    roomId: row.room_id,
+    userId: row.user_id,
+    role: row.role,
+    attachmentIds,
+    expiresAt: row.expires_at,
+    revokedAt: row.revoked_at ?? undefined,
+    createdAt: row.created_at
+  };
+}
+
+function normalizeArtifact(row: DbArtifact): ArtifactRecord {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    runId: row.run_id ?? undefined,
+    kind: row.kind,
+    filePath: row.file_path,
+    displayName: row.display_name,
+    mimeType: row.mime_type,
+    sizeBytes: row.size_bytes,
+    sha256: row.sha256,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    deliveredAt: row.delivered_at ?? undefined
+  };
+}
+
+function hashCapabilityToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
 function normalizeToolCall(row: DbToolCall): ToolCallRecord {
   return {
     id: row.id,
@@ -1501,6 +1870,6 @@ function normalizeMemory(row: DbMemory): MemoryRecord {
   };
 }
 
-function memoryRoomId(scope: MemoryScope, roomId: string): string {
-  return scope === 'global' ? '*' : roomId;
+function memoryRoomId(_scope: MemoryScope, roomId: string): string {
+  return roomId;
 }

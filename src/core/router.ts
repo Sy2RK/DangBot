@@ -29,6 +29,7 @@ import type { TaskQueue } from '../domain/taskQueue.js';
 import type { FileService } from '../services/files/fileService.js';
 import type { ChatTurn, OpenAICompatibleClient } from '../services/llm/openaiCompatibleClient.js';
 import type { WebSearchClient } from '../services/search/braveSearchClient.js';
+import type { HermesTaskExecutor } from '../services/hermes/hermesTaskExecutor.js';
 import type { AppDatabase } from '../storage/database.js';
 import {
   buildToolInputForRequest,
@@ -45,11 +46,7 @@ import {
   type ToolResult
 } from '../tools/registry.js';
 import { currentBeijingDateContext } from '../utils/time.js';
-import {
-  formatPlainList,
-  normalizeOutgoingText,
-  replyPhrases
-} from './replyStyle.js';
+import { formatPlainList, normalizeOutgoingText, replyPhrases } from './replyStyle.js';
 import type {
   AppConfig,
   AutomationRecord,
@@ -114,7 +111,8 @@ export class BotRequestRouter {
     private readonly logger: Logger,
     private readonly systemPrompt = '你是微信群里的公共智能助手。回答要清晰、简洁、可执行。不要泄露无关隐私；权限不足或信息不足时要说明。',
     private readonly memoryConsolidation?: MemoryConsolidationService,
-    private readonly webSearch?: WebSearchClient
+    private readonly webSearch?: WebSearchClient,
+    private readonly hermesExecutor?: HermesTaskExecutor
   ) {
     this.tools = createBuiltinToolRegistry();
     this.toolPolicy = new ToolPolicyEngine(config);
@@ -419,9 +417,13 @@ export class BotRequestRouter {
       detail: `运行中 ${this.queue.runningCount()}，等待 ${this.queue.pendingCount()}。`
     });
 
+    if (this.config.agent.backend === 'hermes') {
+      items.push(await this.hermesHealth());
+    }
+
     const llmConfigured = this.llm.configured();
     items.push({
-      name: 'LLM',
+      name: this.config.agent.backend === 'hermes' ? '多模态工具模型' : 'LLM',
       state: llmConfigured ? 'ok' : 'warn',
       detail: llmConfigured
         ? `文本模型 ${this.config.llm.textModel} 已配置。`
@@ -516,6 +518,27 @@ export class BotRequestRouter {
     }
   }
 
+  private async hermesHealth(): Promise<HealthItem> {
+    if (!this.hermesExecutor?.configured()) {
+      return { name: '独立 Hermes', state: 'warn', detail: 'API 或会话密钥未配置。' };
+    }
+    try {
+      const detail = await this.hermesExecutor.health(AbortSignal.timeout(2_000));
+      const status = typeof detail.status === 'string' ? detail.status : 'ok';
+      return {
+        name: '独立 Hermes',
+        state: status === 'ok' || status === 'healthy' ? 'ok' : 'warn',
+        detail: `专用后端可访问，模型 ${this.config.agent.hermes.model}。`
+      };
+    } catch (error) {
+      return {
+        name: '独立 Hermes',
+        state: 'warn',
+        detail: `专用后端不可用：${error instanceof Error ? error.message : '未知错误'}。`
+      };
+    }
+  }
+
   private webSearchHealth(llmConfigured: boolean): HealthItem {
     if (!this.config.search.enabled) {
       return {
@@ -526,7 +549,9 @@ export class BotRequestRouter {
     }
 
     const configured =
-      this.config.search.provider === 'openrouter' ? llmConfigured : Boolean(this.webSearch?.configured());
+      this.config.search.provider === 'openrouter'
+        ? llmConfigured
+        : Boolean(this.webSearch?.configured());
 
     return {
       name: '联网搜索',
@@ -626,7 +651,7 @@ export class BotRequestRouter {
     await this.replyPlain(
       responder,
       formatPlainList(
-        '全局持久记忆',
+        '本群共享持久记忆',
         memories.map((memory) => memory.content)
       )
     );
@@ -690,7 +715,9 @@ export class BotRequestRouter {
         ? definition.requestType
         : await classifyRequestKind(definition.prompt, [], this.llm, this.logger);
     const toolName = toolNameForRequestKind(requestType);
-    const toolInput = toolName ? buildToolInputForRequest(requestType, definition.prompt) : undefined;
+    const toolInput = toolName
+      ? buildToolInputForRequest(requestType, definition.prompt)
+      : undefined;
     const toolInputJson = toolName ? stringifyToolInput(toolInput) : undefined;
     const tool = toolName ? this.tools.get(toolName) : undefined;
     const room = this.db.getRoomById(roomId);
@@ -706,7 +733,10 @@ export class BotRequestRouter {
       this.db.addAudit({
         roomId,
         userId: message.senderId,
-        action: policy.action === 'deny' ? 'automation_policy_denied' : 'automation_policy_needs_approval',
+        action:
+          policy.action === 'deny'
+            ? 'automation_policy_denied'
+            : 'automation_policy_needs_approval',
         details: { requestType, toolName, reason: policy.reason }
       });
       await this.replyPlain(
@@ -765,8 +795,16 @@ export class BotRequestRouter {
     }
 
     this.db.updateAutomation(automation.id, { status: 'paused' });
-    this.db.addAudit({ roomId, userId, action: 'automation_paused', details: { automationId: automation.id } });
-    await this.replyPlain(responder, `好，我先把这只小闹钟按住了，喵。\n${automationKindLine(automation)}：${automation.prompt}`);
+    this.db.addAudit({
+      roomId,
+      userId,
+      action: 'automation_paused',
+      details: { automationId: automation.id }
+    });
+    await this.replyPlain(
+      responder,
+      `好，我先把这只小闹钟按住了，喵。\n${automationKindLine(automation)}：${automation.prompt}`
+    );
   }
 
   private async resumeAutomation(
@@ -792,7 +830,12 @@ export class BotRequestRouter {
       nextRunAt,
       lastError: null
     });
-    this.db.addAudit({ roomId, userId, action: 'automation_resumed', details: { automationId: automation.id } });
+    this.db.addAudit({
+      roomId,
+      userId,
+      action: 'automation_resumed',
+      details: { automationId: automation.id }
+    });
     await this.replyPlain(
       responder,
       [
@@ -816,8 +859,16 @@ export class BotRequestRouter {
     }
 
     this.db.deleteAutomation(automation.id);
-    this.db.addAudit({ roomId, userId, action: 'automation_deleted', details: { automationId: automation.id } });
-    await this.replyPlain(responder, `好，我把这只小闹钟叼走啦，喵。\n${automationKindLine(automation)}：${automation.prompt}`);
+    this.db.addAudit({
+      roomId,
+      userId,
+      action: 'automation_deleted',
+      details: { automationId: automation.id }
+    });
+    await this.replyPlain(
+      responder,
+      `好，我把这只小闹钟叼走啦，喵。\n${automationKindLine(automation)}：${automation.prompt}`
+    );
   }
 
   private getRoomAutomation(command: ParsedCommand, roomId: string): AutomationRecord | undefined {
@@ -851,6 +902,7 @@ export class BotRequestRouter {
 
     this.db.updateTask(task.id, { status: 'cancelled', error: '管理员取消' });
     this.queue.cancel(task.id);
+    await this.hermesExecutor?.stopTask(task.id);
     this.db.addAudit({ roomId, userId, action: 'task_cancelled', details: { taskId: task.id } });
     await this.replyPlain(responder, replyPhrases.taskCancelled);
   }
@@ -881,8 +933,16 @@ export class BotRequestRouter {
     });
 
     if (!approved) {
+      await this.hermesExecutor?.approveTask(task.id, false);
       this.db.updateTask(task.id, { status: 'cancelled', error: '管理员拒绝审批' });
+      this.queue.cancel(task.id);
       await this.replyPlain(responder, replyPhrases.approvalRejected);
+      return;
+    }
+
+    if (await this.hermesExecutor?.approveTask(task.id, true)) {
+      this.db.updateTask(task.id, { status: 'processing' });
+      await this.replyPlain(responder, replyPhrases.approvalAccepted);
       return;
     }
 
@@ -946,13 +1006,20 @@ export class BotRequestRouter {
         ? (this.db.getRecentAttachment(roomId, message.senderId, 'file') ??
           this.db.getRecentAttachment(roomId, message.senderId))
         : undefined;
-    const classification = await classifyRequest(
-      prompt,
-      attachments.map(toClassificationAttachment),
-      recentAttachment ? [toClassificationAttachment(recentAttachment)] : [],
-      this.llm,
-      this.logger
-    );
+    const classification =
+      this.config.agent.backend === 'hermes'
+        ? classifyHermesIngress(
+            prompt,
+            attachments.map(toClassificationAttachment),
+            recentAttachment ? [toClassificationAttachment(recentAttachment)] : []
+          )
+        : await classifyRequest(
+            prompt,
+            attachments.map(toClassificationAttachment),
+            recentAttachment ? [toClassificationAttachment(recentAttachment)] : [],
+            this.llm,
+            this.logger
+          );
     const requestType = classification.requestType;
     const currentSourceAttachment = selectCurrentSourceAttachment(requestType, attachmentRecords);
     const sourceAttachment =
@@ -1153,8 +1220,18 @@ export class BotRequestRouter {
     const afterPlan = this.db.getTask(taskId);
     if (!afterPlan || afterPlan.status === 'cancelled' || signal.aborted) return;
     await progress.plan(plan);
-    const result = await this.performTask(task, taskAttachments, signal, progress);
+    const result =
+      this.config.agent.backend === 'hermes'
+        ? await this.performHermesTask(task, taskAttachments, signal, progress)
+        : await this.performTask(task, taskAttachments, signal, progress);
     const current = this.db.getTask(taskId);
+    if (current?.status === 'waiting_approval') {
+      await this.replyPlain(
+        responder,
+        `这个任务暂停在安全审批点。管理员回复 @${this.config.bot.name} 同意 或 拒绝。`
+      );
+      return;
+    }
     if (!current || current.status === 'cancelled' || signal.aborted) return;
     await this.deliverResult(current, result, responder, progress);
   }
@@ -1165,6 +1242,7 @@ export class BotRequestRouter {
     signal: AbortSignal
   ): Promise<TaskPlan> {
     const fallback = buildTemplateTaskPlan(task, attachments);
+    if (this.config.agent.backend === 'hermes') return fallback;
     if (!shouldUseLlmPlan(task.requestType, task.toolName) || !this.llm.configured())
       return fallback;
 
@@ -1289,6 +1367,19 @@ export class BotRequestRouter {
     });
     this.memoryConsolidation?.triggerUserLimitCheck(task.roomId, task.userId);
     return { text };
+  }
+
+  private async performHermesTask(
+    task: TaskRecord,
+    attachments: AttachmentRecord[],
+    signal: AbortSignal,
+    progress: TaskProgressReporter
+  ): Promise<{ text?: string; filePath?: string; imagePath?: string; artifactId?: string }> {
+    if (!this.hermesExecutor?.configured()) {
+      throw new Error('独立 Hermes 后端未就绪，已拒绝回退到本机 Agent 或宿主机工具。');
+    }
+    await progress.stage('任务已经交给独立 Hermes 后端啦。');
+    return this.hermesExecutor.execute(task, attachments, signal, progress);
   }
 
   private async executeRegisteredTool(
@@ -1563,7 +1654,12 @@ export class BotRequestRouter {
         roomId: task.roomId,
         userId: task.userId,
         action: 'tool_call_failed',
-        details: { taskId: task.id, toolCallId: toolCall.id, toolName: definition.name, error: message }
+        details: {
+          taskId: task.id,
+          toolCallId: toolCall.id,
+          toolName: definition.name,
+          error: message
+        }
       });
       throw error;
     }
@@ -1660,7 +1756,7 @@ export class BotRequestRouter {
 
   private async deliverResult(
     task: TaskRecord,
-    result: { text?: string; filePath?: string; imagePath?: string },
+    result: { text?: string; filePath?: string; imagePath?: string; artifactId?: string },
     responder: BotResponder,
     progress: TaskProgressReporter
   ): Promise<void> {
@@ -1672,6 +1768,15 @@ export class BotRequestRouter {
       });
       await progress.completedFile();
       await responder.replyImage(result.imagePath);
+      if (result.artifactId) {
+        this.db.markArtifactDelivered(result.artifactId);
+        this.db.addAudit({
+          roomId: task.roomId,
+          userId: task.userId,
+          action: 'artifact_delivered',
+          details: { taskId: task.id, artifactId: result.artifactId, kind: 'image' }
+        });
+      }
       this.appendRoomContext(
         task.roomId,
         'assistant',
@@ -1688,6 +1793,15 @@ export class BotRequestRouter {
       });
       await progress.completedFile();
       await responder.replyFile(result.filePath);
+      if (result.artifactId) {
+        this.db.markArtifactDelivered(result.artifactId);
+        this.db.addAudit({
+          roomId: task.roomId,
+          userId: task.userId,
+          action: 'artifact_delivered',
+          details: { taskId: task.id, artifactId: result.artifactId, kind: 'file' }
+        });
+      }
       this.appendRoomContext(
         task.roomId,
         'assistant',
@@ -1838,9 +1952,11 @@ function compactProgressText(text: string): string {
     : compact;
 }
 
-function toolResultToTaskResult(
-  result: ToolResult
-): { text?: string; filePath?: string; imagePath?: string } {
+function toolResultToTaskResult(result: ToolResult): {
+  text?: string;
+  filePath?: string;
+  imagePath?: string;
+} {
   return {
     text: result.text,
     filePath: result.filePath,
@@ -1859,9 +1975,7 @@ function validateAgentToolSequence(
     if (lastSearchIndex >= 0) {
       const searchText = observationText(observations[lastSearchIndex]);
       const source =
-        input && typeof input === 'object'
-          ? (input as Record<string, unknown>).source
-          : undefined;
+        input && typeof input === 'object' ? (input as Record<string, unknown>).source : undefined;
       if (typeof source !== 'string' || source.trim() !== searchText?.trim()) {
         return 'text.prepare 的 source 必须完整使用最近一次 web.search 的结果，不能替换成其他材料。';
       }
@@ -1886,9 +2000,7 @@ function validateAgentToolSequence(
     ) {
       const preparedText = observationText(preparation);
       const voiceText =
-        input && typeof input === 'object'
-          ? (input as Record<string, unknown>).text
-          : undefined;
+        input && typeof input === 'object' ? (input as Record<string, unknown>).text : undefined;
       if (typeof voiceText === 'string' && voiceText.trim() === preparedText?.trim()) {
         return undefined;
       }
@@ -1927,10 +2039,7 @@ function promptReferencesNamedWork(prompt: string): boolean {
   );
 }
 
-function findLastObservationIndex(
-  observations: AgentObservation[],
-  toolName: string
-): number {
+function findLastObservationIndex(observations: AgentObservation[], toolName: string): number {
   for (let index = observations.length - 1; index >= 0; index -= 1) {
     if (observations[index]?.toolName === toolName) return index;
   }
@@ -1951,6 +2060,49 @@ function toClassificationAttachment(
     mimeType: attachment.mimeType,
     kind: attachment.kind
   };
+}
+
+function classifyHermesIngress(
+  prompt: string,
+  currentAttachments: ClassificationAttachment[],
+  recentAttachments: ClassificationAttachment[]
+): {
+  requestType: RequestKind;
+  attachmentSource: 'none' | 'current_attachment' | 'recent_attachment';
+} {
+  const normalized = prompt.toLowerCase();
+  const source =
+    currentAttachments.length > 0
+      ? 'current_attachment'
+      : recentAttachments.length > 0 &&
+          /(这个|这份|刚才|附件|文件|文档|图片|截图|视频|润色|改写|翻译|缩写|扩写)/i.test(prompt)
+        ? 'recent_attachment'
+        : 'none';
+  const attachments = source === 'current_attachment' ? currentAttachments : recentAttachments;
+  const kind = attachments[0]?.kind;
+
+  if (/(生成|制作|画|绘制|改图).*(图片|图像|海报|插画)|图生图|文生图/i.test(prompt)) {
+    return { requestType: 'image_generation', attachmentSource: source };
+  }
+  if (/(生成|制作).*(视频|短片)|图生视频|文生视频|让.*动起来/i.test(prompt)) {
+    return { requestType: 'video_generation', attachmentSource: source };
+  }
+  if (/(朗读|语音|转成.*音频|合成.*声音)/i.test(prompt)) {
+    return { requestType: 'voice_generation', attachmentSource: 'none' };
+  }
+  if (/(docx|word|文档文件|做成.*文档|生成.*文档)/i.test(normalized)) {
+    return { requestType: 'document_generation', attachmentSource: source };
+  }
+  if (/(搜索|联网|查一下|最新|实时|新闻|价格|天气)/i.test(prompt)) {
+    return { requestType: 'web_search', attachmentSource: 'none' };
+  }
+  if (kind === 'image') return { requestType: 'image_analysis', attachmentSource: source };
+  if (kind === 'video') return { requestType: 'video_analysis', attachmentSource: source };
+  if (kind === 'file') return { requestType: 'file_analysis', attachmentSource: source };
+  if (/(群聊|讨论).*(总结|纪要)|会议纪要/i.test(prompt)) {
+    return { requestType: 'room_minutes', attachmentSource: 'none' };
+  }
+  return { requestType: 'qa', attachmentSource: source };
 }
 
 function toolNameForClassifiedRequest(

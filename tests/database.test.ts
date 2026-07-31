@@ -25,9 +25,9 @@ describe('AppDatabase', () => {
       prompt: '做成 DOCX'
     });
 
-    expect(
-      db.listRecentCompletedTextTasks('room1', 'user1', current.id)
-    ).toMatchObject([{ id: source.id, resultText: '润色后的正文' }]);
+    expect(db.listRecentCompletedTextTasks('room1', 'user1', current.id)).toMatchObject([
+      { id: source.id, resultText: '润色后的正文' }
+    ]);
     expect(db.listRecentCompletedRoomTextTasks('room1', current.id)).toMatchObject([
       { id: source.id, resultText: '润色后的正文' }
     ]);
@@ -171,11 +171,13 @@ describe('AppDatabase', () => {
 
     expect(db.resolveRoom('runtime-old')).toMatchObject({ id: 'stable-room', authorized: true });
     expect(db.resolveRoom('runtime-new')).toMatchObject({ id: 'stable-room', authorized: true });
-    expect(db.getContext({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 })).toEqual([
-      { role: 'user', content: '旧上下文' }
-    ]);
     expect(
-      db.listMemories({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 }).map((m) => m.content)
+      db.getContext({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 })
+    ).toEqual([{ role: 'user', content: '旧上下文' }]);
+    expect(
+      db
+        .listMemories({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 })
+        .map((m) => m.content)
     ).toEqual(['旧记忆']);
     expect(db.listRoomTasks('stable-room', 10).map((task) => task.prompt)).toEqual(['旧任务']);
     expect(db.listRoomTasks('runtime-old', 10)).toEqual([]);
@@ -232,8 +234,20 @@ describe('AppDatabase', () => {
 
   it('isolates user contexts inside the same room', () => {
     const db = AppDatabase.memory();
-    db.appendContext({ scope: 'user', roomId: 'room1', userId: 'u1', role: 'user', content: 'one' });
-    db.appendContext({ scope: 'user', roomId: 'room1', userId: 'u2', role: 'user', content: 'two' });
+    db.appendContext({
+      scope: 'user',
+      roomId: 'room1',
+      userId: 'u1',
+      role: 'user',
+      content: 'one'
+    });
+    db.appendContext({
+      scope: 'user',
+      roomId: 'room1',
+      userId: 'u2',
+      role: 'user',
+      content: 'two'
+    });
 
     expect(db.getContext({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })).toEqual([
       { role: 'user', content: 'one' }
@@ -248,15 +262,20 @@ describe('AppDatabase', () => {
     db.addMemory({ scope: 'user', roomId: 'room1', userId: 'u2', content: '喜欢详细回答' });
     db.addMemory({ scope: 'global', roomId: 'room1', content: '默认使用中文' });
 
-    expect(db.listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 }).map((m) => m.content)).toEqual([
-      '喜欢短回答'
-    ]);
-    expect(db.listMemories({ scope: 'global', roomId: 'room2', limit: 10 }).map((m) => m.content)).toEqual([
-      '默认使用中文'
-    ]);
+    expect(
+      db
+        .listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })
+        .map((m) => m.content)
+    ).toEqual(['喜欢短回答']);
+    expect(
+      db.listMemories({ scope: 'global', roomId: 'room1', limit: 10 }).map((m) => m.content)
+    ).toEqual(['默认使用中文']);
+    expect(db.listMemories({ scope: 'global', roomId: 'room2', limit: 10 })).toEqual([]);
 
     expect(db.clearMemories({ scope: 'user', roomId: 'room1', userId: 'u1' })).toBe(1);
-    expect(db.listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })).toEqual([]);
+    expect(db.listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })).toEqual(
+      []
+    );
     db.close();
   });
 

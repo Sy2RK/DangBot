@@ -1,0 +1,86 @@
+# Dedicated Hermes configuration for DangBot.
+# This file is copied into .runtime/hermes/home/config.yaml by the bootstrap script.
+# Secrets remain environment references and are never stored in Git.
+model: deepseek-v4-flash
+max_concurrent_sessions: 2
+
+agent:
+  max_turns: 30
+  gateway_timeout: 600
+  disabled_toolsets:
+    - terminal
+    - file
+    - code_execution
+    - vision
+    - video
+    - image_gen
+    - video_gen
+    - x_search
+    - tts
+    - skills
+    - todo
+    - memory
+    - context_engine
+    - session_search
+    - clarify
+    - delegation
+    - cronjob
+    - homeassistant
+    - spotify
+    - discord
+    - discord_admin
+    - yuanbao
+    - computer_use
+
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+  write_approval: true
+
+platform_toolsets:
+  api_server:
+    - web
+    - browser
+    - dangbot
+
+known_plugin_toolsets:
+  api_server: []
+
+browser:
+  headed: false
+  record_sessions: false
+  allow_private_urls: false
+  auto_local_for_private_urls: false
+  restrict_evaluate: true
+  allow_unsafe_evaluate: false
+  inactivity_timeout: 120
+  command_timeout: 30
+
+web:
+  backend: native
+  extract_char_limit: 15000
+
+mcp_servers:
+  dangbot:
+    url: http://127.0.0.1:18643/mcp
+    headers:
+      Authorization: Bearer ${DANGBOT_MCP_API_KEY}
+    timeout: 600
+    connect_timeout: 10
+    skip_preflight: true
+    supports_parallel_tool_calls: false
+    tools:
+      include:
+        - dangbot_capabilities
+        - dangbot_execute_tool
+        - dangbot_list_memories
+        - dangbot_list_attachments
+        - dangbot_room_context
+        - dangbot_execute_javascript
+
+gateway:
+  strict: true
+  media_delivery_allow_dirs: []
+  trust_recent_files: false
+  api_server:
+    max_concurrent_runs: 2

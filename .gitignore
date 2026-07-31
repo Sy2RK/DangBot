@@ -4,6 +4,7 @@ coverage/
 data/
 logs/
 tmp/
+.runtime/
 .env
 config/local.yaml
 *.memory-card.json

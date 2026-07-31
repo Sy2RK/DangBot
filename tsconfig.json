@@ -12,9 +12,17 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
+    "allowJs": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "eslint.config.js", "vitest.config.ts"],
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "scripts/**/*.mjs",
+    "eslint.config.js",
+    "vitest.config.ts"
+  ],
   "exclude": ["dist", "node_modules", "data", "logs"]
 }
