@@ -1,4 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import type { AppConfig, HermesRunStatus } from '../../types.js';
 import { redactSensitiveText } from '../../utils/redaction.js';
 
@@ -49,6 +51,19 @@ interface HermesRunStatusResponse {
   usage?: Record<string, number>;
 }
 
+interface HermesToolsetResponse {
+  data?: Array<{ enabled?: boolean; tools?: string[] }>;
+}
+
+interface HermesModelResponse {
+  data?: Array<{ id?: string }>;
+}
+
+const requiredHermesNativeTools = [
+  'web_search',
+  'browser_navigate'
+] as const;
+
 export class HermesBackendClient {
   private activeRuns = 0;
 
@@ -90,6 +105,83 @@ export class HermesBackendClient {
     return this.requestJson<Record<string, unknown>>('/health/detailed', { method: 'GET' }, signal);
   }
 
+  async assertReady(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const health = await this.health(signal);
+    const readiness = isRecord(health.readiness) ? health.readiness : undefined;
+    if (health.status !== 'ok' || readiness?.status !== 'ok') {
+      throw new Error('专用 Hermes readiness 未通过，拒绝接入微信流量。');
+    }
+    await this.assertDedicatedIdentity(health);
+
+    const models = await this.requestJson<HermesModelResponse>(
+      '/v1/models',
+      { method: 'GET' },
+      signal
+    );
+    if (!models.data?.some((model) => model.id === this.config.model)) {
+      throw new Error(`专用 Hermes 未声明要求的主模型 ${this.config.model}。`);
+    }
+
+    const toolsets = await this.requestJson<HermesToolsetResponse>(
+      '/v1/toolsets',
+      { method: 'GET' },
+      signal
+    );
+    const exposed = new Set(
+      (toolsets.data ?? [])
+        .filter((toolset) => toolset.enabled === true)
+        .flatMap((toolset) => toolset.tools ?? [])
+        .map(normalizeHermesToolName)
+    );
+    // Hermes 0.19.0 /v1/toolsets intentionally enumerates built-in and plugin
+    // toolsets only; custom MCP aliases are verified independently by the
+    // DangBot MCP server and end-to-end offline preflight.
+    const missing = requiredHermesNativeTools.filter((tool) => !exposed.has(tool));
+    if (missing.length > 0) {
+      throw new Error(`专用 Hermes 缺少安全工具：${missing.join(', ')}。`);
+    }
+    const forbidden = [...exposed].filter((tool) =>
+      /terminal|execute_code|read_file|write_file|patch|computer|cron|delegate|skill|homeassistant/iu.test(
+        tool
+      )
+    );
+    if (forbidden.length > 0) {
+      throw new Error(`专用 Hermes 暴露了禁止工具：${forbidden.join(', ')}。`);
+    }
+    const unexpected = [...exposed].filter(
+      (tool) => !tool.startsWith('web_') && !tool.startsWith('browser_')
+    );
+    if (unexpected.length > 0) {
+      throw new Error(`专用 Hermes 暴露了白名单外工具：${unexpected.join(', ')}。`);
+    }
+    return health;
+  }
+
+  private async assertDedicatedIdentity(health: Record<string, unknown>): Promise<void> {
+    if (!this.config.identityFile) return;
+    let identity: unknown;
+    try {
+      identity = JSON.parse(await readFile(this.config.identityFile, 'utf8')) as unknown;
+    } catch {
+      throw new Error('无法读取 DangBot 专用 Hermes identity 文件。');
+    }
+    if (!isRecord(identity) || typeof identity.pid !== 'number' || health.pid !== identity.pid) {
+      throw new Error('Hermes API PID 与 DangBot 专用 identity 不一致，拒绝操作该实例。');
+    }
+    const argv = Array.isArray(identity.argv)
+      ? identity.argv.filter((entry): entry is string => typeof entry === 'string')
+      : [];
+    const runtimeRoot = path.dirname(path.dirname(this.config.identityFile));
+    const belongsToRuntime = argv.some((entry) => {
+      if (!path.isAbsolute(entry)) return false;
+      const relative = path.relative(runtimeRoot, path.resolve(entry));
+      return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+    });
+    if (!belongsToRuntime) {
+      throw new Error('Hermes identity 不属于 DangBot 专用运行目录，拒绝操作该实例。');
+    }
+  }
+
   async run(input: HermesRunInput, signal: AbortSignal): Promise<HermesRunResult> {
     if (!this.configured()) {
       throw new Error('Hermes 后端尚未配置 API 密钥或会话密钥。');
@@ -100,7 +192,14 @@ export class HermesBackendClient {
 
     this.activeRuns += 1;
     let runId: string | undefined;
+    let stopPromise: Promise<void> | undefined;
     const timeout = createTimeoutSignal(this.config.requestTimeoutMs, signal);
+    const requestStop = () => {
+      if (!runId) return Promise.resolve();
+      stopPromise ??= this.stopRunIfPresent(runId, AbortSignal.timeout(30_000))
+        .then(() => undefined);
+      return stopPromise;
+    };
     try {
       const started = await this.requestJson<{ run_id: string; status: string }>(
         '/v1/runs',
@@ -120,7 +219,7 @@ export class HermesBackendClient {
       if (!runId) throw new Error('Hermes 没有返回 run_id。');
       await input.onStarted?.(runId);
 
-      const abortHandler = () => void this.stopRun(runId!).catch(() => undefined);
+      const abortHandler = () => void requestStop().catch(() => undefined);
       timeout.signal.addEventListener('abort', abortHandler, { once: true });
       try {
         const streamed = await this.consumeEvents(runId, input.onEvent, timeout.signal).catch(
@@ -136,6 +235,20 @@ export class HermesBackendClient {
       } finally {
         timeout.signal.removeEventListener('abort', abortHandler);
       }
+    } catch (error) {
+      if (runId && timeout.signal.aborted) {
+        try {
+          await requestStop();
+        } catch (stopError) {
+          throw new Error(
+            `Hermes run 在取消后未确认停止：${safeErrorPreview(
+              stopError instanceof Error ? stopError.message : String(stopError)
+            )}`,
+            { cause: error }
+          );
+        }
+      }
+      throw error;
     } finally {
       timeout.dispose();
       this.activeRuns -= 1;
@@ -149,11 +262,38 @@ export class HermesBackendClient {
     });
   }
 
-  async stopRun(runId: string): Promise<void> {
+  async stopRun(runId: string, signal?: AbortSignal): Promise<void> {
     await this.requestJson(`/v1/runs/${encodeURIComponent(runId)}/stop`, {
       method: 'POST',
       body: '{}'
-    });
+    }, signal);
+  }
+
+  async stopRunIfPresent(
+    runId: string,
+    signal: AbortSignal = AbortSignal.timeout(30_000)
+  ): Promise<'stopped' | 'missing'> {
+    try {
+      await this.stopRun(runId, signal);
+    } catch (error) {
+      if (error instanceof HermesHttpError && error.status === 404) return 'missing';
+      throw error;
+    }
+    while (!signal.aborted) {
+      try {
+        const status = await this.requestJson<HermesRunStatusResponse>(
+          `/v1/runs/${encodeURIComponent(runId)}`,
+          { method: 'GET' },
+          signal
+        );
+        if (['completed', 'failed', 'cancelled'].includes(status.status)) return 'stopped';
+      } catch (error) {
+        if (error instanceof HermesHttpError && error.status === 404) return 'missing';
+        throw error;
+      }
+      await delay(this.config.pollIntervalMs, signal);
+    }
+    throw abortError();
   }
 
   private async consumeEvents(
@@ -235,7 +375,10 @@ export class HermesBackendClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Hermes 请求失败（HTTP ${response.status}）：${safeErrorPreview(text)}`);
+      throw new HermesHttpError(
+        response.status,
+        `Hermes 请求失败（HTTP ${response.status}）：${safeErrorPreview(text)}`
+      );
     }
     if (!text) return {} as T;
     try {
@@ -256,6 +399,24 @@ export class HermesBackendClient {
   private url(pathname: string): string {
     return new URL(pathname, `${this.config.baseURL.replace(/\/$/, '')}/`).toString();
   }
+}
+
+class HermesHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'HermesHttpError';
+  }
+}
+
+function normalizeHermesToolName(value: string): string {
+  return value.replace(/^mcp__dangbot__/u, '');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
 export async function* parseSseEvents(

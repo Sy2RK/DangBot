@@ -347,6 +347,7 @@ export class AppDatabase {
         user_id TEXT NOT NULL,
         trigger TEXT NOT NULL,
         task_ids_json TEXT NOT NULL,
+        candidate_ids_json TEXT NOT NULL DEFAULT '[]',
         evidence_json TEXT NOT NULL DEFAULT '[]',
         hermes_run_id TEXT,
         status TEXT NOT NULL,
@@ -396,6 +397,7 @@ export class AppDatabase {
     this.ensureColumn('mcp_contexts', 'purpose', "TEXT NOT NULL DEFAULT 'interactive'");
     this.ensureColumn('memory_proposals', 'notified_at', 'TEXT');
     this.ensureColumn('reflection_batches', 'evidence_json', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('reflection_batches', 'candidate_ids_json', "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn('memories', 'source', "TEXT NOT NULL DEFAULT 'manual'");
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_memories_source
@@ -1190,6 +1192,61 @@ export class AppDatabase {
     return row ? normalizeHermesRun(row) : undefined;
   }
 
+  listActiveHermesRuns(): HermesRunRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM hermes_runs
+        WHERE status IN ('queued', 'running', 'waiting_for_approval', 'stopping')
+        ORDER BY created_at
+      `
+      )
+      .all() as DbHermesRun[];
+    return rows.map(normalizeHermesRun);
+  }
+
+  reconcileInterruptedWork(reason: string): {
+    taskCount: number;
+    hermesRuns: HermesRunRecord[];
+    reflectionBatchCount: number;
+  } {
+    const hermesRuns = this.listActiveHermesRuns();
+    const reflectionBatches = this.db
+      .prepare("SELECT * FROM reflection_batches WHERE status IN ('pending', 'running')")
+      .all() as DbReflectionBatch[];
+    const now = nowIso();
+    let taskCount = 0;
+    const tx = this.db.transaction(() => {
+      taskCount = this.db
+        .prepare(
+          `
+          UPDATE tasks SET status = 'failed', error = ?, updated_at = ?
+          WHERE status IN ('received', 'processing', 'waiting_approval')
+        `
+        )
+        .run(reason, now).changes;
+      this.db
+        .prepare(
+          `
+          UPDATE hermes_runs SET status = 'stopping', error = ?, updated_at = ?
+          WHERE status IN ('queued', 'running', 'waiting_for_approval', 'stopping')
+        `
+        )
+        .run(reason, now);
+      for (const row of reflectionBatches) {
+        const batch = normalizeReflectionBatch(row);
+        this.releaseReflectionCandidates(batch);
+        this.db
+          .prepare(
+            "UPDATE reflection_batches SET status = 'failed', result = ?, updated_at = ? WHERE id = ?"
+          )
+          .run(reason, now, batch.id);
+      }
+    });
+    tx();
+    return { taskCount, hermesRuns, reflectionBatchCount: reflectionBatches.length };
+  }
+
   updateHermesRun(
     taskId: string,
     patch: { status: HermesRunStatus; error?: string }
@@ -1849,7 +1906,9 @@ export class AppDatabase {
 
   revokeAgentLesson(id: string): boolean {
     const result = this.db
-      .prepare('UPDATE agent_lessons SET revoked_at = ?, updated_at = ? WHERE id = ?')
+      .prepare(
+        'UPDATE agent_lessons SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at IS NULL'
+      )
       .run(nowIso(), nowIso(), id);
     return result.changes > 0;
   }
@@ -1927,8 +1986,9 @@ export class AppDatabase {
         .prepare(
           `
           INSERT INTO reflection_batches (
-            id, room_id, user_id, trigger, task_ids_json, evidence_json, status, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            id, room_id, user_id, trigger, task_ids_json, candidate_ids_json,
+            evidence_json, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         `
         )
         .run(
@@ -1937,6 +1997,7 @@ export class AppDatabase {
           input.userId,
           input.trigger,
           JSON.stringify(taskIds),
+          JSON.stringify(candidates.map((candidate) => candidate.id)),
           JSON.stringify(
             candidates.map((candidate) => ({
               taskId: candidate.task_id,
@@ -1986,16 +2047,68 @@ export class AppDatabase {
     return this.getReflectionBatch(id);
   }
 
+  failReflectionBatch(id: string, result: string): ReflectionBatchRecord | undefined {
+    const current = this.getReflectionBatch(id);
+    if (!current || current.status === 'completed') return current;
+    const tx = this.db.transaction(() => {
+      this.releaseReflectionCandidates(current);
+      this.db
+        .prepare(
+          "UPDATE reflection_batches SET status = 'failed', result = ?, updated_at = ? WHERE id = ?"
+        )
+        .run(result, nowIso(), id);
+    });
+    tx();
+    return this.getReflectionBatch(id);
+  }
+
   latestReflectionAt(roomId: string, userId: string): string | undefined {
     const row = this.db
       .prepare(
         `
         SELECT MAX(created_at) AS created_at FROM reflection_batches
-        WHERE room_id = ? AND user_id = ?
+        WHERE room_id = ? AND user_id = ? AND status IN ('pending', 'running', 'completed')
       `
       )
       .get(roomId, userId) as { created_at?: string | null };
     return row.created_at ?? undefined;
+  }
+
+  private releaseReflectionCandidates(batch: ReflectionBatchRecord): void {
+    if (batch.candidateIds.length > 0) {
+      const release = this.db.prepare(
+        'UPDATE reflection_candidates SET consumed_at = NULL WHERE id = ?'
+      );
+      for (const id of batch.candidateIds) release.run(id);
+      return;
+    }
+
+    const existing = this.db.prepare(
+      `
+      SELECT 1 FROM reflection_candidates
+      WHERE task_id = ? AND signal = ? AND evidence = ? AND consumed_at IS NULL
+      LIMIT 1
+    `
+    );
+    const insert = this.db.prepare(
+      `
+      INSERT INTO reflection_candidates (
+        id, room_id, user_id, task_id, signal, evidence, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `
+    );
+    for (const candidate of batch.evidence) {
+      if (existing.get(candidate.taskId, candidate.signal, candidate.evidence)) continue;
+      insert.run(
+        `reflection_candidate_${randomUUID().slice(0, 12)}`,
+        batch.roomId,
+        batch.userId,
+        candidate.taskId,
+        candidate.signal,
+        candidate.evidence,
+        nowIso()
+      );
+    }
   }
 
   addAudit(input: { roomId?: string; userId?: string; action: string; details?: unknown }): void {
@@ -2183,6 +2296,7 @@ interface DbReflectionBatch {
   user_id: string;
   trigger: ReflectionBatchRecord['trigger'];
   task_ids_json: string;
+  candidate_ids_json: string;
   evidence_json: string;
   hermes_run_id?: string | null;
   status: ReflectionBatchRecord['status'];
@@ -2395,6 +2509,7 @@ function normalizeAgentLesson(row: DbAgentLesson): AgentLessonRecord {
 
 function normalizeReflectionBatch(row: DbReflectionBatch): ReflectionBatchRecord {
   let taskIds: string[] = [];
+  let candidateIds: string[] = [];
   let evidence: ReflectionBatchRecord['evidence'] = [];
   try {
     const parsed = JSON.parse(row.task_ids_json) as unknown;
@@ -2403,6 +2518,14 @@ function normalizeReflectionBatch(row: DbReflectionBatch): ReflectionBatchRecord
     }
   } catch {
     taskIds = [];
+  }
+  try {
+    const parsed = JSON.parse(row.candidate_ids_json) as unknown;
+    if (Array.isArray(parsed)) {
+      candidateIds = parsed.filter((value): value is string => typeof value === 'string');
+    }
+  } catch {
+    candidateIds = [];
   }
   try {
     const parsed = JSON.parse(row.evidence_json) as unknown;
@@ -2430,6 +2553,7 @@ function normalizeReflectionBatch(row: DbReflectionBatch): ReflectionBatchRecord
     userId: row.user_id,
     trigger: row.trigger,
     taskIds,
+    candidateIds,
     evidence,
     hermesRunId: row.hermes_run_id ?? undefined,
     status: row.status,

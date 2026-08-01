@@ -1,6 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HermesBackendClient } from '../src/services/hermes/hermesBackendClient.js';
+
+const nativeTools = ['web_search', 'browser_navigate'];
 
 describe('HermesBackendClient', () => {
   const servers: ReturnType<typeof createServer>[] = [];
@@ -14,6 +19,84 @@ describe('HermesBackendClient', () => {
           })
       )
     );
+  });
+
+  it('fails closed unless readiness, model, and the exact safe tool surface are present', async () => {
+    const requested: string[] = [];
+    const baseURL = await listen((request, response) => {
+      requested.push(request.url ?? '');
+      if (request.url === '/health/detailed') {
+        return json(response, 200, { status: 'ok', readiness: { status: 'ok' } });
+      }
+      if (request.url === '/v1/models') {
+        return json(response, 200, { data: [{ id: 'deepseek-v4-flash' }] });
+      }
+      if (request.url === '/v1/toolsets') {
+        return json(response, 200, { data: [{ enabled: true, tools: nativeTools }] });
+      }
+      return json(response, 404, {});
+    });
+    await expect(makeClient(baseURL).assertReady()).resolves.toMatchObject({ status: 'ok' });
+    expect(requested).toEqual(['/health/detailed', '/v1/models', '/v1/toolsets']);
+
+    const degradedURL = await listen((request, response) => {
+      if (request.url === '/health/detailed') {
+        return json(response, 200, { status: 'degraded', readiness: { status: 'degraded' } });
+      }
+      return json(response, 404, {});
+    });
+    await expect(makeClient(degradedURL).assertReady()).rejects.toThrow(/readiness/iu);
+
+    const identityRoot = await mkdtemp(path.join(os.tmpdir(), 'dangbot-hermes-identity-'));
+    const identityFile = path.join(identityRoot, 'home', 'gateway.pid');
+    await mkdir(path.dirname(identityFile), { recursive: true });
+    await writeFile(identityFile, JSON.stringify({
+      pid: 42,
+      argv: [path.join(identityRoot, 'venv', 'bin', 'python')]
+    }));
+    const wrongIdentityURL = await listen((request, response) => {
+      if (request.url === '/health/detailed') {
+        return json(response, 200, { status: 'ok', readiness: { status: 'ok' }, pid: 43 });
+      }
+      return json(response, 404, {});
+    });
+    await expect(makeClient(wrongIdentityURL, identityFile).assertReady()).rejects.toThrow(
+      /PID/iu
+    );
+
+    const missingToolURL = await listen((request, response) => {
+      if (request.url === '/health/detailed') {
+        return json(response, 200, { status: 'ok', readiness: { status: 'ok' } });
+      }
+      if (request.url === '/v1/models') {
+        return json(response, 200, { data: [{ id: 'deepseek-v4-flash' }] });
+      }
+      if (request.url === '/v1/toolsets') {
+        return json(response, 200, {
+          data: [{ enabled: true, tools: nativeTools.filter((tool) => tool !== 'browser_navigate') }]
+        });
+      }
+      return json(response, 404, {});
+    });
+    await expect(makeClient(missingToolURL).assertReady()).rejects.toThrow(
+      /browser_navigate/iu
+    );
+
+    const unsafeToolURL = await listen((request, response) => {
+      if (request.url === '/health/detailed') {
+        return json(response, 200, { status: 'ok', readiness: { status: 'ok' } });
+      }
+      if (request.url === '/v1/models') {
+        return json(response, 200, { data: [{ id: 'deepseek-v4-flash' }] });
+      }
+      if (request.url === '/v1/toolsets') {
+        return json(response, 200, {
+          data: [{ enabled: true, tools: [...nativeTools, 'terminal'] }]
+        });
+      }
+      return json(response, 404, {});
+    });
+    await expect(makeClient(unsafeToolURL).assertReady()).rejects.toThrow(/terminal/iu);
   });
 
   it('starts a run, streams terminal events, and sends scoped session headers', async () => {
@@ -162,7 +245,9 @@ describe('HermesBackendClient', () => {
       }
       if (request.url === '/v1/runs/run_timeout/events') return json(response, 503, {});
       if (request.url === '/v1/runs/run_timeout' && request.method === 'GET') {
-        return json(response, 200, { run_id: 'run_timeout', status: 'running' });
+        return json(response, 200, {
+          run_id: 'run_timeout', status: stopped ? 'cancelled' : 'running'
+        });
       }
       if (request.url === '/v1/runs/run_timeout/stop' && request.method === 'POST') {
         stopped = true;
@@ -174,6 +259,7 @@ describe('HermesBackendClient', () => {
       baseURL,
       apiKey: 'api-test-key-long-enough',
       sessionSecret: 'stable-test-session-secret-at-least-32-characters',
+      identityFile: '',
       model: 'deepseek-v4-flash',
       requestTimeoutMs: 40,
       pollIntervalMs: 10,
@@ -191,15 +277,23 @@ describe('HermesBackendClient', () => {
         new AbortController().signal
       )
     ).rejects.toThrow();
-    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(stopped).toBe(true);
   });
 
-  function makeClient(baseURL: string): HermesBackendClient {
+  it('treats an already missing orphan run as safely stopped during restart reconciliation', async () => {
+    const baseURL = await listen((request, response) => {
+      if (request.url === '/v1/runs/run_missing/stop') return json(response, 404, {});
+      return json(response, 500, {});
+    });
+    await expect(makeClient(baseURL).stopRunIfPresent('run_missing')).resolves.toBe('missing');
+  });
+
+  function makeClient(baseURL: string, identityFile = ''): HermesBackendClient {
     return new HermesBackendClient({
       baseURL,
       apiKey: 'api-test-key-long-enough',
       sessionSecret: 'stable-test-session-secret-at-least-32-characters',
+      identityFile,
       model: 'deepseek-v4-flash',
       requestTimeoutMs: 2_000,
       pollIntervalMs: 10,

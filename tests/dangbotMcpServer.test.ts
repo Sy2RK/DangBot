@@ -15,8 +15,9 @@ import { makeTestConfig, silentLogger } from './helpers.js';
 describe('DangBot first-class MCP', () => {
   it('has no generic execution entry and enforces attachment/capability isolation', async () => {
     const fixture = await createFixture();
-    const { server, client, transport, capability, db, allowedPath } = fixture;
+    const { server, client, transport, capability, db, allowedPath, config } = fixture;
     try {
+      await expect(server.assertReady()).resolves.toHaveLength(17);
       const tools = await client.listTools();
       const names = tools.tools.map((tool) => tool.name);
       expect(names).toContain('dangbot_file_extract');
@@ -49,6 +50,17 @@ describe('DangBot first-class MCP', () => {
         name: 'dangbot_javascript_execute', arguments: { contextId: capability.token, code: 'return 6 * 7;' }
       }));
       expect(javascript).toMatchObject({ status: 'ok', data: { value: 42 } });
+
+      const oversized = await client.callTool({
+        name: 'dangbot_javascript_execute',
+        arguments: {
+          contextId: capability.token,
+          code: "return Array.from({ length: 100 }, () => 'x'.repeat(8000));"
+        }
+      });
+      const oversizedText = payloadText(oversized);
+      expect(oversizedText.length).toBeLessThanOrEqual(config.limits.maxMcpOutputChars);
+      expect(JSON.parse(oversizedText)).toMatchObject({ status: 'ok' });
 
       const forged = await client.callTool({
         name: 'dangbot_attachment_list', arguments: { contextId: `${capability.token}x` }
@@ -325,6 +337,10 @@ async function createFixture(
 }
 
 function payload(result: unknown): Record<string, unknown> {
+  return JSON.parse(payloadText(result)) as Record<string, unknown>;
+}
+
+function payloadText(result: unknown): string {
   if (!result || typeof result !== 'object' || !('content' in result) || !Array.isArray(result.content)) {
     throw new Error('Missing MCP content');
   }
@@ -332,5 +348,5 @@ function payload(result: unknown): Record<string, unknown> {
     Boolean(entry && typeof entry === 'object' && 'type' in entry && entry.type === 'text')
   );
   if (!text) throw new Error('Missing MCP text content');
-  return JSON.parse(text.text) as Record<string, unknown>;
+  return text.text;
 }

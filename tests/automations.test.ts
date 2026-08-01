@@ -63,4 +63,34 @@ describe('Hermes-native automations', () => {
     expect(computeNextRunForAutomation(automation, from)).toBe('2026-08-01T00:01:00.000Z');
     db.close();
   });
+
+  it('never replays an Agent run after dispatch may have produced side effects', async () => {
+    const config = await makeTestConfig({
+      automations: { retryCount: 3, retryDelayMs: 1 }
+    });
+    config.auth.rooms[0]!.enabled = true;
+    const db = AppDatabase.memory();
+    db.seedConfig(config);
+    const dueAt = new Date('2026-08-01T00:00:00.000Z');
+    const automation = db.createAutomation({
+      roomId: 'room1', creatorId: 'admin', name: '付费报告', kind: 'scheduled_prompt',
+      scheduleType: 'once',
+      scheduleSpecJson: serializeScheduleSpec({ type: 'once', at: dueAt.toISOString(), label: '现在' }),
+      timezone: 'Asia/Shanghai', prompt: '生成视频报告', nextRunAt: dueAt.toISOString()
+    });
+    const handleAutomationTrigger = vi.fn(async () => {
+      throw new Error('artifact delivery failed after dispatch');
+    });
+    const scheduler = new AutomationScheduler(
+      config,
+      db,
+      { handleAutomationTrigger },
+      { createRoomResponder: async () => new MemoryResponder() },
+      silentLogger()
+    );
+    await scheduler.runDueOnce(new Date(dueAt.getTime() + 1));
+    expect(handleAutomationTrigger).toHaveBeenCalledTimes(1);
+    expect(db.getAutomation(automation.id)?.status).toBe('failed');
+    db.close();
+  });
 });

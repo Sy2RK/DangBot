@@ -53,7 +53,7 @@ pnpm start
 
 macOS 可用 `pnpm hermes:install:launchd` 安装标签为 `com.sy2rk.dangbot-hermes` 的专属服务。其他平台直接用各自服务管理器运行 `scripts/hermes/run-dedicated.mjs`。完整流程见 [专属 Hermes 运维手册](docs/hermes-backend.md)。
 
-DangBot 启动前会检查专属 Hermes、MCP、Memory Bridge 和 DashScope 媒体凭据；任一关键依赖未就绪就直接失败，不会回退到旧 Agent。
+DangBot 启动前会把 API 返回的 PID 与项目 `.runtime/hermes/home/gateway.pid` 核对，再检查专属 Hermes readiness、`deepseek-v4-flash` 模型声明、完整安全工具面、MCP、Memory Bridge 和 DashScope 媒体凭据；PID 或任一关键依赖不匹配就直接失败，不会连接微信、误操作其他 Hermes 或回退到旧 Agent。进程重启后会先撤销旧 capability、终止专属 Hermes 孤儿 run，并把中断任务明确标记失败；不会把失联任务留在处理中。
 
 ## 微信入口
 
@@ -71,6 +71,7 @@ DangBot 启动前会检查专属 Hermes、MCP、Memory Bridge 和 DashScope 媒�
 - `@DangBot 同意` / `拒绝`：只处理当前 Hermes 审批点，只有 allow-once 或 deny。
 - `@DangBot 同意 proposal_...` / `拒绝 proposal_...`：按个人、群或系统管理员作用域审批记忆提案。
 - `@DangBot 记忆提案`：只列出当前身份有权审批的 pending 提案。
+- `@DangBot Agent 经验`、`@DangBot 撤销 Agent 经验 lesson_...`：仅系统管理员查看和撤销已批准的跨群经验。
 
 自然语言提醒、自动任务、复合文件处理、搜索、浏览器、媒体和文档请求都直接进入 Hermes。例如“搜索今天的资料，分析刚才的 PDF，再整理成 DOCX”允许 Hermes 连续调用多项独立工具，并在结构化错误后重新规划。可能产生费用但语义不清的请求会先返回普通澄清问题。
 
@@ -91,7 +92,7 @@ Qwen Image 3.0 Pro 需要供应商账号权限。如果供应商返回 403，Dan
 
 反思由信号触发并批量执行：累计 5 个候选或空闲 15 分钟触发，每批最多 8 个任务，同一会话至少间隔 30 分钟。它复用同一个 Hermes/DeepSeek，但使用独立 reflection session 和 capability，只能调用作用域记忆工具，也不会向微信群回复。
 
-个人记忆仅在置信度不低于 0.95、证据是当前用户原话、无冲突、非敏感、非临时状态且每批最多一条时自动保存；其余交本人审批。群记忆始终由群管理员审批，跨群 Agent 经验始终由系统管理员审批。自动保存会在该用户下一次交互时透明提示。
+个人记忆仅在置信度不低于 0.95、证据是足够长度的当前用户原话、内容被证据直接支持、无冲突、非敏感、非临时状态且每批最多一条时自动保存；其余交本人审批。群记忆始终由群管理员审批，跨群 Agent 经验始终由系统管理员审批并可撤销。反思执行临时失败时，候选会安全释放并等待后续批次重试，不会静默丢失。自动保存会在该用户下一次交互时透明提示。
 
 首次迁移只保留 `source=manual` 的个人/本群记忆；旧自动摘要和 `room_id='*'` 数据会删除。
 

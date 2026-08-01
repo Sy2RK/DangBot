@@ -45,6 +45,7 @@ const configSchema = z.object({
           baseURL: z.string().url().default('http://127.0.0.1:18642'),
           apiKey: z.string().default(''),
           sessionSecret: z.string().default(''),
+          identityFile: z.string().min(1).default('.runtime/hermes/home/gateway.pid'),
           model: z.literal('deepseek-v4-flash').default('deepseek-v4-flash'),
           requestTimeoutMs: z.number().int().positive().default(900_000),
           pollIntervalMs: z.number().int().min(100).default(1_000),
@@ -54,6 +55,7 @@ const configSchema = z.object({
           baseURL: 'http://127.0.0.1:18642',
           apiKey: '',
           sessionSecret: '',
+          identityFile: '.runtime/hermes/home/gateway.pid',
           model: 'deepseek-v4-flash',
           requestTimeoutMs: 900_000,
           pollIntervalMs: 1_000,
@@ -107,6 +109,7 @@ const configSchema = z.object({
         baseURL: 'http://127.0.0.1:18642',
         apiKey: '',
         sessionSecret: '',
+        identityFile: '.runtime/hermes/home/gateway.pid',
         model: 'deepseek-v4-flash',
         requestTimeoutMs: 900_000,
         pollIntervalMs: 1_000,
@@ -200,7 +203,7 @@ const configSchema = z.object({
     memoryEntriesPerUser: z.number().int().positive().default(20),
     globalMemoryEntries: z.number().int().positive().default(30),
     attachmentTtlHours: z.number().int().positive().default(24),
-    maxMcpOutputChars: z.number().int().positive().default(8_000)
+    maxMcpOutputChars: z.number().int().min(1_024).default(8_000)
   }),
   reflection: z
     .object({
@@ -303,6 +306,22 @@ export async function loadConfig(configPath = process.env.DANGBOT_CONFIG): Promi
   parsed.storage.uploadsDir = resolveFromCwd(parsed.storage.uploadsDir);
   parsed.storage.outputsDir = resolveFromCwd(parsed.storage.outputsDir);
   parsed.logging.file = resolveFromCwd(parsed.logging.file);
+  parsed.agent.hermes.identityFile = resolveFromCwd(parsed.agent.hermes.identityFile);
+
+  const hermesUrl = new URL(parsed.agent.hermes.baseURL);
+  if (
+    hermesUrl.protocol !== 'http:' ||
+    hermesUrl.hostname !== '127.0.0.1' ||
+    hermesUrl.port !== '18642' ||
+    (hermesUrl.pathname !== '/' && hermesUrl.pathname !== '')
+  ) {
+    throw new Error('DangBot 专用 Hermes API 必须固定为 http://127.0.0.1:18642。');
+  }
+  const dedicatedRuntimeRoot = path.resolve(process.cwd(), '.runtime/hermes');
+  const identityRelative = path.relative(dedicatedRuntimeRoot, parsed.agent.hermes.identityFile);
+  if (identityRelative.startsWith('..') || path.isAbsolute(identityRelative)) {
+    throw new Error('Hermes identityFile 必须位于项目 .runtime/hermes 目录内。');
+  }
 
   return parsed;
 }

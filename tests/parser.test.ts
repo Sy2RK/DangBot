@@ -26,6 +26,11 @@ describe('parser', () => {
     expect(parseCommand('我的记忆').type).toBe('show_user_memory');
     expect(parseCommand('全局记忆').type).toBe('show_global_memory');
     expect(parseCommand('记忆提案').type).toBe('list_memory_proposals');
+    expect(parseCommand('Agent 经验').type).toBe('list_agent_lessons');
+    expect(parseCommand('撤销 Agent 经验 lesson_abc12345')).toMatchObject({
+      type: 'revoke_agent_lesson',
+      lessonId: 'lesson_abc12345'
+    });
     expect(parseCommand('忘记 mem_abc12345')).toMatchObject({
       type: 'delete_user_memory',
       memoryId: 'mem_abc12345'

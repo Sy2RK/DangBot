@@ -72,6 +72,7 @@ export class AutomationScheduler {
     }
 
     let lastError: unknown;
+    let dispatched = false;
     for (let attempt = 0; attempt <= this.config.automations.retryCount; attempt += 1) {
       if (attempt > 0) await delay(this.config.automations.retryDelayMs);
       try {
@@ -85,6 +86,9 @@ export class AutomationScheduler {
         if (!room?.authorized || !room.enabled) throw new Error('自动化所在群未授权或未启用');
         const responder = await this.responderFactory.createRoomResponder(current.roomId);
         if (!responder) throw new Error('无法找到自动化目标群');
+        // Once the Agent runner is entered, messages, billable tools, or artifacts may
+        // already have side effects. Never replay that full chain automatically.
+        dispatched = true;
         await this.runner.handleAutomationTrigger(current, responder);
         this.db.updateAutomation(current.id, {
           status: current.scheduleType === 'once' ? 'completed' : 'active',
@@ -101,6 +105,7 @@ export class AutomationScheduler {
           { error: safeErrorSummary(error), automationId: current.id, attempt },
           'automation attempt failed'
         );
+        if (dispatched) break;
       }
     }
 

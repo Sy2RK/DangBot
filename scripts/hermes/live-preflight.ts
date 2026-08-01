@@ -8,7 +8,7 @@ if (!client.configured()) {
   throw new Error('Dedicated Hermes client is not configured.');
 }
 
-await client.health(AbortSignal.timeout(10_000));
+await client.assertReady(AbortSignal.timeout(10_000));
 const identity = client.sessionIdentity('dangbot-live-preflight', randomUUID(), 0);
 let toolCalls = 0;
 const result = await client.run(

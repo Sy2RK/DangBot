@@ -106,6 +106,9 @@ describe('dangbot_scoped MemoryProvider bridge', () => {
         })
       }).then((response) => response.json() as Promise<Record<string, any>>);
     try {
+      expect((await propose('用户长期住在上海', '回答请详细')).data.status).toBe('pending');
+      expect((await propose('回答请详细', '回')).data.status).toBe('pending');
+      expect((await propose('联系方式是13800138000', '联系方式是13800138000')).data.status).toBe('pending');
       expect((await propose('喜欢绿色', '用户喜欢绿色')).data.status).toBe('pending');
       expect((await propose('回答请详细', '回答请详细')).data.status).toBe('pending');
       expect(db.listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })).toHaveLength(1);

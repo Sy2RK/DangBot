@@ -5,7 +5,7 @@
 - `ai.hermes.gateway` 不属于 DangBot。不得停止、重启、更新、替换或切换它的 profile；不得读取、复制或散列以外处理 `~/.hermes` 中的凭据和会话内容。
 - DangBot 专属实例固定使用项目 `.runtime/hermes/`、API `127.0.0.1:18642`、MCP/Memory Bridge `127.0.0.1:18643` 和 launchd 标签 `com.sy2rk.dangbot-hermes`。
 - 微信群只经 Wechaty/wechat4u 接入，不启用 Hermes 微信适配器。
-- Hermes 是唯一 Agent。Hermes、MCP、Memory Bridge 或 DashScope 关键配置未就绪时 DangBot 启动失败，不存在旧后端回退。
+- Hermes 是唯一 Agent。启动必须先确认 `/health/detailed` PID 与项目 `.runtime/hermes/home/gateway.pid` 一致，再通过 readiness、`deepseek-v4-flash` 模型声明和完整安全工具面握手；身份不匹配或 Hermes、MCP、Memory Bridge、DashScope 关键配置未就绪时 DangBot 启动失败且不连接微信，不存在误操作其他 Hermes 或旧后端回退。
 - 回滚只能恢复上一稳定 Git SHA 与数据库/配置快照，然后只重启 DangBot。
 
 ## 运行组件
@@ -98,6 +98,8 @@ Hermes 0.19.0 要暴露外部 Provider 工具就必须连同共享 `memory` tool
 - 物理删除旧 tasks/automations 的 `request_type/tool_name/tool_input_json` 路由列与旧 Node `contexts` 表；
 - 只保留 `source=manual` 且不属于 `room_id='*'` 的记忆；旧 `global` 记录仅在其原群内转为 room scope；
 - 把旧 `scheduled_tool` 自动任务标记迁移为 `scheduled_prompt`。
+
+每次进程启动还会先撤销所有旧 MCP capability，把上次实例遗留的 received/processing/waiting-approval 任务标记为明确失败，释放未完成反思批次的候选，并在接入微信前调用专属 Hermes `/stop` 终止孤儿 run。除 404 表示 run 已不存在外，孤儿 run 停止失败会阻断启动，避免新旧任务并发重叠。
 
 切换前必须对 `data/` 与 `config/local.yaml` 做受控快照，并记录上一稳定 Git SHA。
 

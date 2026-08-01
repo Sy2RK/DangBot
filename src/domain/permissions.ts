@@ -19,6 +19,11 @@ const adminCommands = new Set<ParsedCommand['type']>([
   'delete_automation'
 ]);
 
+const systemAdminCommands = new Set<ParsedCommand['type']>([
+  'list_agent_lessons',
+  'revoke_agent_lesson'
+]);
+
 export function canUseCommand(
   command: ParsedCommand,
   role: UserRole,
@@ -28,6 +33,8 @@ export function canUseCommand(
   if (role === 'system_admin') return true;
 
   if (!room?.authorized) return false;
+
+  if (systemAdminCommands.has(command.type)) return false;
 
   if (adminCommands.has(command.type)) {
     return role === 'group_admin' || options.adminless === true;

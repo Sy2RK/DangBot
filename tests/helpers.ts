@@ -37,6 +37,7 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
         baseURL: 'http://127.0.0.1:18642',
         apiKey: '',
         sessionSecret: 'test-session-secret-that-is-not-used-outside-tests',
+        identityFile: '',
         model: 'deepseek-v4-flash',
         requestTimeoutMs: 5_000,
         pollIntervalMs: 10,

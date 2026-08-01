@@ -77,6 +77,7 @@ const provider = createServer((request, response) => {
 
 try {
   await mcp.start();
+  await mcp.assertReady();
   await probePythonMcp();
   await listen(provider, providerPort);
   gateway = startGateway();
@@ -86,11 +87,16 @@ try {
     baseURL: `http://127.0.0.1:${apiPort}`,
     apiKey,
     sessionSecret,
+    // The offline gateway intentionally combines a temporary HERMES_HOME with
+    // the project venv, so production PID/runtime identity matching is covered
+    // by unit tests and the live dedicated preflight instead.
+    identityFile: '',
     model: 'deepseek-v4-flash',
     requestTimeoutMs: 60_000,
     pollIntervalMs: 100,
     maxConcurrentRuns: 2
   });
+  await client.assertReady(AbortSignal.timeout(10_000));
   const identity = client.sessionIdentity('offline-room', 'offline-user', 0);
   db.upsertHermesSession({
     sessionKeyHash: identity.sessionKeyHash,

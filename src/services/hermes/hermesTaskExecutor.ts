@@ -36,6 +36,10 @@ export class HermesTaskExecutor {
     return this.client.health(signal);
   }
 
+  async assertReady(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return this.client.assertReady(signal);
+  }
+
   async execute(
     task: TaskRecord,
     attachments: AttachmentRecord[],

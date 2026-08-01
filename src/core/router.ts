@@ -131,6 +131,12 @@ export class BotRequestRouter {
       case 'list_memory_proposals':
         await this.replyMemoryProposals(room.id, message.senderId, role, responder);
         return;
+      case 'list_agent_lessons':
+        await this.replyAgentLessons(responder);
+        return;
+      case 'revoke_agent_lesson':
+        await this.revokeAgentLesson(command, room.id, message.senderId, responder);
+        return;
       case 'delete_user_memory':
         await this.deleteUserMemory(command, room.id, message.senderId, responder);
         return;
@@ -561,6 +567,44 @@ export class BotRequestRouter {
     );
   }
 
+  private async replyAgentLessons(responder: BotResponder): Promise<void> {
+    const lessons = this.db.listAgentLessons(100);
+    await this.replyPlain(
+      responder,
+      formatPlainList(
+        '已批准的跨群 Agent 经验',
+        lessons.map(
+          (lesson) =>
+            `${lesson.id} [confidence=${lesson.confidence.toFixed(2)}] ${lesson.content}`
+        ),
+        '目前没有生效中的跨群 Agent 经验。'
+      )
+    );
+  }
+
+  private async revokeAgentLesson(
+    command: ParsedCommand,
+    roomId: string,
+    userId: string,
+    responder: BotResponder
+  ): Promise<void> {
+    const revoked = command.lessonId ? this.db.revokeAgentLesson(command.lessonId) : false;
+    if (revoked) {
+      this.db.addAudit({
+        roomId,
+        userId,
+        action: 'agent_lesson_revoked',
+        details: { lessonId: command.lessonId }
+      });
+    }
+    await this.replyPlain(
+      responder,
+      revoked
+        ? `跨群 Agent 经验 ${command.lessonId} 已撤销，之后不会再召回。`
+        : '没找到仍在生效的这条 Agent 经验。'
+    );
+  }
+
   private async setAutomationStatus(
     command: ParsedCommand,
     roomId: string,
@@ -671,5 +715,8 @@ export class BotRequestRouter {
 
 function permissionMessage(command: ParsedCommand, roomEnabled: boolean): string {
   if (!roomEnabled && command.type === 'normal_request') return replyPhrases.roomNotEnabled;
+  if (command.type === 'list_agent_lessons' || command.type === 'revoke_agent_lesson') {
+    return '这个操作只允许系统管理员使用。';
+  }
   return '这个操作需要群管理员或系统管理员权限。';
 }

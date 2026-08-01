@@ -11,6 +11,7 @@ agent:
     baseURL: ${DANGBOT_HERMES_BASE_URL:-http://127.0.0.1:18642}
     apiKey: ${DANGBOT_HERMES_API_KEY:-}
     sessionSecret: ${DANGBOT_HERMES_SESSION_SECRET:-}
+    identityFile: .runtime/hermes/home/gateway.pid
     model: ${DANGBOT_HERMES_MODEL:-deepseek-v4-flash}
   mcp:
     enabled: true

@@ -35,6 +35,19 @@ describe('permissions', () => {
     );
   });
 
+  it('reserves cross-room Agent lesson management for system administrators', () => {
+    const list: ParsedCommand = { type: 'list_agent_lessons', rawText: 'Agent 经验' };
+    const revoke: ParsedCommand = {
+      type: 'revoke_agent_lesson',
+      rawText: '撤销 Agent 经验 lesson_abc12345',
+      lessonId: 'lesson_abc12345'
+    };
+    expect(canUseCommand(list, 'group_admin', enabledRoom)).toBe(false);
+    expect(canUseCommand(revoke, 'group_admin', enabledRoom)).toBe(false);
+    expect(canUseCommand(list, 'system_admin', enabledRoom)).toBe(true);
+    expect(canUseCommand(revoke, 'system_admin', enabledRoom)).toBe(true);
+  });
+
   it('allows status and health for normal members in disabled rooms', () => {
     const disabled = { ...enabledRoom, enabled: false };
     expect(canUseCommand({ type: 'status', rawText: '状态' }, 'member', disabled)).toBe(true);

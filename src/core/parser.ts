@@ -4,6 +4,7 @@ const taskIdPattern = /(task_[a-f0-9-]{8,36})/i;
 const automationIdPattern = /(auto_[a-f0-9-]{8,36})/i;
 const proposalIdPattern = /(proposal_[a-f0-9-]{8,36})/i;
 const memoryIdPattern = /(mem_[a-f0-9-]{8,36})/i;
+const lessonIdPattern = /(lesson_[a-f0-9-]{8,36})/i;
 const automationOrdinalPattern = /第\s*([0-9一二三四五六七八九十两]+)\s*(?:个|条|项|只)?/;
 
 export function parseCommand(text: string): ParsedCommand {
@@ -70,6 +71,15 @@ export function parseCommand(text: string): ParsedCommand {
 
   if (/^(记忆提案|待审批记忆|查看记忆提案|memory proposals)$/i.test(normalized)) {
     return { type: 'list_memory_proposals', rawText };
+  }
+
+  if (/^(Agent经验|Agent 经验|查看Agent经验|查看 Agent 经验|agent lessons)$/i.test(normalized)) {
+    return { type: 'list_agent_lessons', rawText };
+  }
+
+  const lessonId = normalized.match(lessonIdPattern)?.[1];
+  if (lessonId && /^(?:撤销经验|撤销Agent经验|撤销 Agent 经验|revoke lesson)/i.test(normalized)) {
+    return { type: 'revoke_agent_lesson', rawText, lessonId };
   }
 
   const memoryId = normalized.match(memoryIdPattern)?.[1];

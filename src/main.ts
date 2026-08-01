@@ -33,6 +33,17 @@ async function main(): Promise<void> {
   if (invalidatedContexts > 0) {
     logger.info({ invalidatedContexts }, 'stale MCP capabilities invalidated at startup');
   }
+  const interrupted = db.reconcileInterruptedWork('DangBot 进程重启，上一实例中的任务已安全中止。');
+  if (interrupted.taskCount > 0 || interrupted.reflectionBatchCount > 0) {
+    logger.warn(
+      {
+        interruptedTasks: interrupted.taskCount,
+        interruptedReflectionBatches: interrupted.reflectionBatchCount,
+        orphanedHermesRuns: interrupted.hermesRuns.length
+      },
+      'interrupted work reconciled before startup'
+    );
+  }
 
   const fileService = new FileService(config);
   const systemPrompt = await loadSoulPrompt();
@@ -80,7 +91,22 @@ async function main(): Promise<void> {
     throw new Error('Qwen Audio TTS 已启用但专用凭据未配置。');
   }
   await mcpServer.start();
-  await hermesExecutor.health(AbortSignal.timeout(5_000));
+  await mcpServer.assertReady();
+  await hermesExecutor.assertReady(AbortSignal.timeout(5_000));
+  for (const run of interrupted.hermesRuns) {
+    const stopResult = await hermesClient.stopRunIfPresent(run.runId);
+    db.updateHermesRun(run.taskId, {
+      status: 'cancelled',
+      error:
+        stopResult === 'missing'
+          ? 'DangBot 重启对账：Hermes 中已不存在该运行。'
+          : 'DangBot 重启对账：已停止孤儿 Hermes 运行。'
+    });
+    logger.warn(
+      { taskId: run.taskId, runId: run.runId, stopResult },
+      'orphaned Hermes run reconciled'
+    );
+  }
   const router = new BotRequestRouter(
     config,
     db,

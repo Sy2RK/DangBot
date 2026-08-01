@@ -92,6 +92,29 @@ describe('Hermes-only微信边缘路由', () => {
     expect(fixture.db.listMemories({ scope: 'user', roomId: 'room1', userId: 'user1', limit: 10 })).toEqual([]);
     fixture.db.close();
   });
+
+  it('lets only a system administrator list and revoke approved Agent lessons', async () => {
+    const fixture = await createRouter(async () => ({ text: 'unused' }));
+    const lesson = fixture.db.addAgentLesson({
+      content: '工具失败后缩小输入重试', evidence: '恢复成功', confidence: 0.99, approvedBy: 'sys'
+    });
+    const denied = new MemoryResponder();
+    await fixture.router.handleMessage(incoming('Agent 经验', 'admin'), denied);
+    expect(denied.texts.join('\n')).not.toContain(lesson.id);
+    expect(denied.texts.join('\n')).toContain('只允许系统管理员');
+
+    const listed = new MemoryResponder();
+    await fixture.router.handleMessage(incoming('Agent 经验', 'sys'), listed);
+    expect(listed.texts.join('\n')).toContain(lesson.id);
+    const revoked = new MemoryResponder();
+    await fixture.router.handleMessage(
+      incoming(`撤销 Agent 经验 ${lesson.id}`, 'sys'),
+      revoked
+    );
+    expect(fixture.db.listAgentLessons()).toEqual([]);
+    expect(revoked.texts.join('\n')).toContain('已撤销');
+    fixture.db.close();
+  });
 });
 
 async function createRouter(
@@ -129,9 +152,9 @@ async function addAttachment(fixture: Awaited<ReturnType<typeof createRouter>>, 
   return record;
 }
 
-function incoming(text: string): IncomingMessage {
+function incoming(text: string, senderId = 'user1'): IncomingMessage {
   return {
-    id: `msg_${Math.random()}`, roomId: 'room1', roomTopic: '测试群', senderId: 'user1', senderName: '用户一',
+    id: `msg_${Math.random()}`, roomId: 'room1', roomTopic: '测试群', senderId, senderName: '用户一',
     text: `@DangBot ${text}`, mentioned: true, mentionText: text, attachments: [], timestamp: new Date()
   };
 }

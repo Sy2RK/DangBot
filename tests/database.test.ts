@@ -46,6 +46,34 @@ describe('Hermes v2 database', () => {
     db.close();
   });
 
+  it('reconciles interrupted tasks, orphaned runs, and reflection candidates after restart', () => {
+    const db = AppDatabase.memory();
+    const task = db.createTask({ roomId: 'r1', userId: 'u1', prompt: 'work', status: 'processing' });
+    db.upsertHermesRun({
+      taskId: task.id,
+      runId: 'run_orphan',
+      sessionId: 'session_orphan',
+      sessionKeyHash: 'a'.repeat(64),
+      contextIdHash: 'b'.repeat(64),
+      status: 'running'
+    });
+    db.addReflectionCandidate({
+      roomId: 'r1', userId: 'u1', taskId: task.id, signal: 'tool_failure', evidence: 'recover me'
+    });
+    const batch = db.createReflectionBatch({ roomId: 'r1', userId: 'u1', trigger: 'manual', maxTasks: 8 });
+    expect(batch?.candidateIds).toHaveLength(1);
+    expect(db.listReflectionCandidateGroups()).toHaveLength(0);
+
+    const reconciled = db.reconcileInterruptedWork('restart');
+    expect(reconciled).toMatchObject({ taskCount: 1, reflectionBatchCount: 1 });
+    expect(reconciled.hermesRuns.map((run) => run.runId)).toEqual(['run_orphan']);
+    expect(db.getTask(task.id)).toMatchObject({ status: 'failed', error: 'restart' });
+    expect(db.getHermesRunByTask(task.id)).toMatchObject({ status: 'stopping' });
+    expect(db.getReflectionBatch(batch!.id)).toMatchObject({ status: 'failed' });
+    expect(db.listReflectionCandidateGroups()).toMatchObject([{ roomId: 'r1', userId: 'u1', count: 1 }]);
+    db.close();
+  });
+
   it('keeps user, room, proposals and approved agent lessons scoped', () => {
     const db = AppDatabase.memory();
     const userMemory = db.addMemory({ scope: 'user', roomId: 'r1', userId: 'u1', source: 'manual', content: '喜欢简短回答' });
@@ -56,6 +84,10 @@ describe('Hermes v2 database', () => {
     expect(db.listMemories({ scope: 'user', roomId: 'r2', userId: 'u1', limit: 10 })).toEqual([]);
     expect(db.listMemories({ scope: 'room', roomId: 'r1', limit: 10 })).toHaveLength(1);
     expect(db.listAgentLessons()).toHaveLength(1);
+    const lesson = db.listAgentLessons()[0]!;
+    expect(db.revokeAgentLesson(lesson.id)).toBe(true);
+    expect(db.revokeAgentLesson(lesson.id)).toBe(false);
+    expect(db.listAgentLessons()).toEqual([]);
     expect(db.deleteUserMemory(userMemory.id, 'r1', 'u2')).toBe(false);
     expect(db.deleteUserMemory(userMemory.id, 'r1', 'u1')).toBe(true);
     expect(db.listMemories({ scope: 'user', roomId: 'r1', userId: 'u2', limit: 10 })).toHaveLength(1);

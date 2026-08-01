@@ -33,32 +33,34 @@ export class ReflectionScheduler {
     this.running = true;
     try {
       for (const group of this.db.listReflectionCandidateGroups()) {
-        const latest = this.db.latestReflectionAt(group.roomId, group.userId);
-        if (latest && now.getTime() - new Date(latest).getTime() < this.config.reflection.minSessionIntervalMs) continue;
-        const idle = now.getTime() - new Date(group.oldestAt).getTime() >= this.config.reflection.idleMs;
-        const threshold = group.count >= this.config.reflection.candidateThreshold;
-        if (!idle && !threshold) continue;
-        const batch = this.db.createReflectionBatch({
-          roomId: group.roomId,
-          userId: group.userId,
-          trigger: threshold ? 'threshold' : 'idle',
-          maxTasks: this.config.reflection.maxTasksPerBatch
-        });
-        if (!batch) continue;
-        const sourceTasks = batch.taskIds
-          .map((id) => this.db.getTask(id))
-          .filter((task): task is TaskRecord => Boolean(task));
-        const task = this.db.createTask({
-          roomId: group.roomId,
-          userId: group.userId,
-          origin: 'reflection',
-          prompt: buildReflectionPrompt(sourceTasks, batch.evidence)
-        });
-        this.db.updateReflectionBatch(batch.id, { status: 'running' });
-        await this.queue.enqueue(
-          task,
-          async (signal) => {
-            try {
+        let batchId: string | undefined;
+        try {
+          const latest = this.db.latestReflectionAt(group.roomId, group.userId);
+          if (latest && now.getTime() - new Date(latest).getTime() < this.config.reflection.minSessionIntervalMs) continue;
+          const idle = now.getTime() - new Date(group.oldestAt).getTime() >= this.config.reflection.idleMs;
+          const threshold = group.count >= this.config.reflection.candidateThreshold;
+          if (!idle && !threshold) continue;
+          const batch = this.db.createReflectionBatch({
+            roomId: group.roomId,
+            userId: group.userId,
+            trigger: threshold ? 'threshold' : 'idle',
+            maxTasks: this.config.reflection.maxTasksPerBatch
+          });
+          if (!batch) continue;
+          batchId = batch.id;
+          const sourceTasks = batch.taskIds
+            .map((id) => this.db.getTask(id))
+            .filter((task): task is TaskRecord => Boolean(task));
+          const task = this.db.createTask({
+            roomId: group.roomId,
+            userId: group.userId,
+            origin: 'reflection',
+            prompt: buildReflectionPrompt(sourceTasks, batch.evidence)
+          });
+          this.db.updateReflectionBatch(batch.id, { status: 'running' });
+          await this.queue.enqueue(
+            task,
+            async (signal) => {
               await this.hermes.execute(task, [], signal, { stage: async () => undefined });
               const run = this.db.getHermesRunByTask(task.id);
               this.db.updateReflectionBatch(batch.id, {
@@ -66,20 +68,23 @@ export class ReflectionScheduler {
                 hermesRunId: run?.runId,
                 result: 'reviewed'
               });
-            } catch (error) {
-              this.db.updateReflectionBatch(batch.id, {
-                status: 'failed',
-                result: safeErrorSummary(error, 500) || 'reflection_failed'
-              });
-              throw error;
-            }
-          },
-          false,
-          this.config.agent.hermes.requestTimeoutMs + 30_000
-        );
+            },
+            false,
+            this.config.agent.hermes.requestTimeoutMs + 30_000
+          );
+        } catch (error) {
+          if (batchId) {
+            this.db.failReflectionBatch(
+              batchId,
+              safeErrorSummary(error, 500) || 'reflection_failed'
+            );
+          }
+          this.logger.error(
+            { error: safeErrorSummary(error), roomId: group.roomId, userId: group.userId },
+            'reflection batch failed'
+          );
+        }
       }
-    } catch (error) {
-      this.logger.error({ error: safeErrorSummary(error) }, 'reflection batch failed');
     } finally {
       this.running = false;
     }

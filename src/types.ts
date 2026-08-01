@@ -75,6 +75,7 @@ export interface AppConfig {
       baseURL: string;
       apiKey: string;
       sessionSecret: string;
+      identityFile: string;
       model: string;
       requestTimeoutMs: number;
       pollIntervalMs: number;
@@ -206,6 +207,8 @@ export interface ParsedCommand {
     | 'reject_task'
     | 'approve_memory_proposal'
     | 'reject_memory_proposal'
+    | 'list_agent_lessons'
+    | 'revoke_agent_lesson'
     | 'remember_user'
     | 'remember_global'
     | 'show_user_memory'
@@ -225,6 +228,7 @@ export interface ParsedCommand {
   automationId?: string;
   automationIndex?: number;
   proposalId?: string;
+  lessonId?: string;
   memoryId?: string;
   prompt?: string;
   memoryText?: string;
@@ -385,6 +389,7 @@ export interface ReflectionBatchRecord {
   userId: string;
   trigger: 'threshold' | 'idle' | 'manual';
   taskIds: string[];
+  candidateIds: string[];
   evidence: Array<{ taskId: string; signal: string; evidence: string }>;
   hermesRunId?: string;
   status: 'pending' | 'running' | 'completed' | 'failed';

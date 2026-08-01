@@ -9,6 +9,8 @@ describe('Hermes-only config', () => {
     expect(config).not.toHaveProperty('llm');
     expect(config.agent.hermes.model).toBe('deepseek-v4-flash');
     expect(config.agent.hermes.maxConcurrentRuns).toBe(2);
+    expect(config.agent.hermes.baseURL).toBe('http://127.0.0.1:18642');
+    expect(config.agent.hermes.identityFile).toMatch(/\.runtime[/\\]hermes[/\\]home[/\\]gateway\.pid$/u);
   });
 
   it('pins media models and scoped memory bridge', async () => {

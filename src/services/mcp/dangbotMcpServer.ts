@@ -7,6 +7,8 @@ import {
 } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
 import type { Logger } from 'pino';
 import type {
@@ -45,6 +47,26 @@ const contextIdSchema = z.string().min(32).max(128);
 const attachmentIdSchema = z.string().regex(/^att_[a-zA-Z0-9-]{8,80}$/u);
 const automationIdSchema = z.string().regex(/^auto_[a-f0-9-]{8,36}$/iu);
 const proposalScopeSchema = z.enum(['user', 'room', 'agent']);
+
+const requiredDangBotTools = [
+  'dangbot_attachment_list',
+  'dangbot_file_extract',
+  'dangbot_image_analyze',
+  'dangbot_video_analyze',
+  'dangbot_image_generate',
+  'dangbot_video_generate',
+  'dangbot_tts_generate',
+  'dangbot_document_render',
+  'dangbot_room_context',
+  'dangbot_javascript_execute',
+  'dangbot_automation_create',
+  'dangbot_automation_list',
+  'dangbot_automation_update',
+  'dangbot_automation_delete',
+  'dangbot_memory_recall',
+  'dangbot_memory_propose',
+  'dangbot_memory_feedback'
+] as const;
 
 interface ToolPayload {
   status: 'ok';
@@ -135,6 +157,30 @@ export class DangBotMcpServer {
   boundPort(): number | undefined {
     const address = this.httpServer?.address();
     return address && typeof address === 'object' ? address.port : undefined;
+  }
+
+  async assertReady(): Promise<string[]> {
+    const port = this.boundPort();
+    if (!port) throw new Error('DangBot MCP 尚未监听，拒绝接入微信流量。');
+    const client = new Client({ name: 'dangbot-startup-probe', version: '2.0.0' });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://${this.config.agent.mcp.host}:${port}/mcp`),
+      { requestInit: { headers: { Authorization: `Bearer ${this.config.agent.mcp.apiKey}` } } }
+    );
+    try {
+      await client.connect(transport);
+      const response = await client.listTools();
+      const actual = response.tools.map((tool) => tool.name).sort();
+      const expected = [...requiredDangBotTools].sort();
+      if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
+        throw new Error(
+          `DangBot MCP 工具面不匹配：expected=${expected.join(',')} actual=${actual.join(',')}`
+        );
+      }
+      return actual;
+    } finally {
+      await transport.close().catch(() => undefined);
+    }
   }
 
   cancelTask(taskId: string): void {
@@ -419,7 +465,11 @@ export class DangBotMcpServer {
       const attachment = await this.verifyAttachment(context, task, attachmentId, 'file');
       const text = await this.fileService.extractText(attachment);
       if (cursor > text.length) throw new SafeToolError('invalid_cursor', 'cursor 超过附件文本长度。');
-      const chunk = text.slice(cursor, cursor + maxChars);
+      const safeMaxChars = Math.max(
+        500,
+        Math.min(maxChars, this.config.limits.maxMcpOutputChars - 1_000)
+      );
+      const chunk = text.slice(cursor, cursor + safeMaxChars);
       const nextCursor = cursor + chunk.length;
       return {
         summary: `已抽取 ${chunk.length} 个字符。`,
@@ -908,8 +958,13 @@ export class DangBotMcpServer {
 
   private autoWriteEligible(task: TaskRecord, content: string, evidence: string, confidence: number): boolean {
     if (confidence < this.config.reflection.autoWriteConfidence) return false;
-    if (!isExactUserEvidence(task.prompt, evidence)) return false;
-    if (looksSensitive(content) || looksTemporary(content)) return false;
+    if (!isSupportedUserMemory(task.prompt, content, evidence)) return false;
+    if (
+      looksSensitive(content) ||
+      looksSensitive(evidence) ||
+      looksTemporary(content) ||
+      looksTemporary(evidence)
+    ) return false;
     const alreadyAutoWritten = this.db
       .listMemoryProposals({ roomId: task.roomId, userId: task.userId, limit: 100 })
       .some((proposal) => proposal.proposerTaskId === task.id && proposal.status === 'auto_approved');
@@ -935,14 +990,22 @@ export class DangBotMcpServer {
   private async mcpResult(work: () => Promise<unknown>) {
     try {
       const payload = await work();
-      return { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] };
+      return {
+        content: [{
+          type: 'text' as const,
+          text: serializeMcpPayload(payload, this.config.limits.maxMcpOutputChars)
+        }]
+      };
     } catch (error) {
       const code = error instanceof SafeToolError ? error.code : 'tool_failed';
       return {
         isError: true,
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ status: 'error', summary: safeErrorMessage(error), artifactIds: [], data: { code } })
+          text: serializeMcpPayload(
+            { status: 'error', summary: safeErrorMessage(error), artifactIds: [], data: { code } },
+            this.config.limits.maxMcpOutputChars
+          )
         }]
       };
     }
@@ -1026,14 +1089,32 @@ function strictString(value: unknown, max: number, name: string): string {
   return value.trim();
 }
 
-function sanitizeData(value: unknown, depth = 0): unknown {
+function sanitizeData(
+  value: unknown,
+  depth = 0,
+  maxStringChars = 8_000,
+  collectionLimit = 100
+): unknown {
   if (value === undefined || value === null) return null;
   if (depth > 6) return '[truncated]';
-  if (typeof value === 'string') return redactHostPaths(value).slice(0, 8_000);
+  if (typeof value === 'string') return redactHostPaths(value).slice(0, maxStringChars);
   if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (Array.isArray(value)) return value.slice(0, 100).map((entry) => sanitizeData(entry, depth + 1));
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([key, entry]) => [key.slice(0, 100), sanitizeData(entry, depth + 1)]));
-  return String(value).slice(0, 1_000);
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, collectionLimit)
+      .map((entry) => sanitizeData(entry, depth + 1, maxStringChars, collectionLimit));
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, collectionLimit)
+        .map(([key, entry]) => [
+          key.slice(0, 100),
+          sanitizeData(entry, depth + 1, maxStringChars, collectionLimit)
+        ])
+    );
+  }
+  return String(value).slice(0, Math.min(1_000, maxStringChars));
 }
 
 function redactHostPaths(value: string): string {
@@ -1045,7 +1126,7 @@ function safeErrorMessage(error: unknown): string {
 }
 
 function looksSensitive(value: string): boolean {
-  return /(sk-[A-Za-z0-9._-]{12,}|api\s*key|token|密码|身份证|银行卡|cookie|手机号|电话号码|家庭住址|邮箱|病史|诊断|药物|工资|账户)/iu.test(value);
+  return /(sk-[A-Za-z0-9._-]{12,}|api\s*key|token|密码|身份证|银行卡|cookie|手机号|电话号码|家庭住址|邮箱|病史|诊断|药物|工资|账户|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|(?:\+?86[- ]?)?1[3-9]\d{9}|\d{15,19})/iu.test(value);
 }
 
 function looksTemporary(value: string): boolean {
@@ -1079,13 +1160,75 @@ function isLikelyConflict(existing: string, proposed: string): boolean {
   );
 }
 
-function isExactUserEvidence(reflectionPrompt: string, evidence: string): boolean {
+function isSupportedUserMemory(
+  reflectionPrompt: string,
+  content: string,
+  evidence: string
+): boolean {
   const quote = evidence.trim();
-  if (!quote) return false;
+  const normalizedQuote = normalizeMemory(quote);
+  const normalizedContent = normalizeMemory(content);
+  if (normalizedQuote.length < 6 || normalizedContent.length < 4) return false;
   const userBlocks = [...reflectionPrompt.matchAll(/用户原话：([\s\S]*?)(?=\n当时最终回答：|\n\n记录\s+\d+|\n\n候选\s+\d+|$)/gu)]
     .map((match) => match[1]?.trim() ?? '')
     .filter(Boolean);
-  return userBlocks.some((block) => block.includes(quote));
+  if (!userBlocks.some((block) => block.includes(quote))) return false;
+  return (
+    normalizedQuote.includes(normalizedContent) ||
+    normalizedContent.includes(normalizedQuote)
+  );
+}
+
+function serializeMcpPayload(value: unknown, maxChars: number): string {
+  const budget = Math.max(1_024, maxChars);
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+  const status = record.status === 'ok' ? 'ok' : 'error';
+  const rawSummary = typeof record.summary === 'string' ? redactHostPaths(record.summary) : '';
+  const rawArtifactIds = Array.isArray(record.artifactIds)
+    ? record.artifactIds.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  const initial = JSON.stringify({
+    status,
+    summary: rawSummary,
+    artifactIds: rawArtifactIds,
+    data: sanitizeData(record.data)
+  });
+  if (initial.length <= budget) return initial;
+
+  const summary = `${rawSummary.slice(0, Math.min(1_000, Math.floor(budget / 4)))}（数据已按安全上限截断）`;
+  const artifactLimits = [...new Set([rawArtifactIds.length, 20, 10, 5, 1, 0])]
+    .filter((limit) => limit <= rawArtifactIds.length);
+  for (const artifactLimit of artifactLimits) {
+    for (const collectionLimit of [100, 50, 20, 10, 5, 2, 1, 0]) {
+      let low = 0;
+      let high = 8_000;
+      let best: string | undefined;
+      while (low <= high) {
+        const stringLimit = Math.floor((low + high) / 2);
+        const candidate = JSON.stringify({
+          status,
+          summary,
+          artifactIds: rawArtifactIds.slice(0, artifactLimit),
+          data: sanitizeData(record.data, 0, stringLimit, collectionLimit)
+        });
+        if (candidate.length <= budget) {
+          best = candidate;
+          low = stringLimit + 1;
+        } else {
+          high = stringLimit - 1;
+        }
+      }
+      if (best) return best;
+    }
+  }
+  return JSON.stringify({
+    status,
+    summary: '工具输出超过安全上限，详细数据已截断。',
+    artifactIds: [],
+    data: { truncated: true }
+  });
 }
 
 function longestCommonPrefix(left: string, right: string): number {
