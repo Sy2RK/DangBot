@@ -2,6 +2,8 @@ import type { ParsedCommand } from '../types.js';
 
 const taskIdPattern = /(task_[a-f0-9-]{8,36})/i;
 const automationIdPattern = /(auto_[a-f0-9-]{8,36})/i;
+const proposalIdPattern = /(proposal_[a-f0-9-]{8,36})/i;
+const memoryIdPattern = /(mem_[a-f0-9-]{8,36})/i;
 const automationOrdinalPattern = /第\s*([0-9一二三四五六七八九十两]+)\s*(?:个|条|项|只)?/;
 
 export function parseCommand(text: string): ParsedCommand {
@@ -66,6 +68,15 @@ export function parseCommand(text: string): ParsedCommand {
     return { type: 'show_global_memory', rawText };
   }
 
+  if (/^(记忆提案|待审批记忆|查看记忆提案|memory proposals)$/i.test(normalized)) {
+    return { type: 'list_memory_proposals', rawText };
+  }
+
+  const memoryId = normalized.match(memoryIdPattern)?.[1];
+  if (memoryId && /^(?:忘记|删除记忆|移除记忆|delete memory)/i.test(normalized)) {
+    return { type: 'delete_user_memory', rawText, memoryId };
+  }
+
   if (/^(清空我的记忆|清除我的记忆|忘掉我的记忆|clear my memory)$/i.test(normalized)) {
     return { type: 'clear_user_memory', rawText };
   }
@@ -83,6 +94,13 @@ export function parseCommand(text: string): ParsedCommand {
   }
 
   const taskId = normalized.match(taskIdPattern)?.[1];
+  const proposalId = normalized.match(proposalIdPattern)?.[1];
+  if (proposalId && /^(同意|批准|approve|allow)/i.test(normalized)) {
+    return { type: 'approve_memory_proposal', rawText, proposalId };
+  }
+  if (proposalId && /^(拒绝|驳回|reject|deny)/i.test(normalized)) {
+    return { type: 'reject_memory_proposal', rawText, proposalId };
+  }
   if (taskId && /^(取消|cancel)/i.test(normalized)) {
     return { type: 'cancel_task', rawText, taskId };
   }

@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import mime from 'mime-types';
 import type { AppDatabase } from '../../storage/database.js';
 import type { AppConfig, ArtifactKind, ArtifactRecord } from '../../types.js';
-import type { ToolResult } from '../../tools/registry.js';
+
+export interface ArtifactCandidateResult {
+  filePath?: string;
+  imagePath?: string;
+}
 
 export class ArtifactBroker {
   constructor(
@@ -16,7 +20,7 @@ export class ArtifactBroker {
   async registerToolResult(
     taskId: string,
     runId: string | undefined,
-    result: ToolResult
+    result: ArtifactCandidateResult
   ): Promise<ArtifactRecord[]> {
     const candidates = [
       result.imagePath ? { filePath: result.imagePath, kind: 'image' as const } : undefined,
@@ -27,6 +31,7 @@ export class ArtifactBroker {
     for (const candidate of candidates) {
       const verified = await this.verifyOutputPath(candidate.filePath);
       const mimeType = mime.lookup(verified.filePath) || 'application/octet-stream';
+      await assertArtifactContent(verified.filePath, mimeType);
       const inferredKind = artifactKindFromMime(mimeType);
       if (candidate.kind === 'image' && inferredKind !== 'image') {
         throw new Error('图片产物的 MIME 类型不可信，拒绝登记。');
@@ -54,6 +59,7 @@ export class ArtifactBroker {
   async resolveForDelivery(artifact: ArtifactRecord): Promise<ArtifactRecord> {
     const verified = await this.verifyOutputPath(artifact.filePath);
     const mimeType = mime.lookup(verified.filePath) || 'application/octet-stream';
+    await assertArtifactContent(verified.filePath, mimeType);
     if (mimeType !== artifact.mimeType) throw new Error('产物 MIME 类型已变化，拒绝发送。');
     const inferredKind = artifactKindFromMime(mimeType);
     if (artifact.kind !== 'file' && inferredKind !== artifact.kind) {
@@ -112,4 +118,37 @@ function hashFile(filePath: string): Promise<string> {
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('end', () => resolve(hash.digest('hex')));
   });
+}
+
+async function assertArtifactContent(filePath: string, mimeType: string): Promise<void> {
+  const header = await readHeader(filePath, 8_192);
+  const valid = mimeType.startsWith('text/')
+    ? !header.includes(0)
+    : mimeType === 'application/pdf'
+      ? header.subarray(0, 5).toString('ascii') === '%PDF-'
+      : mimeType.includes('openxmlformats-officedocument')
+        ? header[0] === 0x50 && header[1] === 0x4b
+        : mimeType === 'image/png'
+          ? header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+          : mimeType === 'image/jpeg'
+            ? header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff
+            : mimeType === 'image/webp'
+              ? header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WEBP'
+              : mimeType.startsWith('audio/')
+                ? header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WAVE'
+                : mimeType.startsWith('video/')
+                  ? header.subarray(4, 8).toString('ascii') === 'ftyp'
+                  : false;
+  if (!valid) throw new Error('产物内容与 MIME 类型不一致，拒绝登记或发送。');
+}
+
+async function readHeader(filePath: string, maxBytes: number): Promise<Buffer> {
+  const handle = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
 }

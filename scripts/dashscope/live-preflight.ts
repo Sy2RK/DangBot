@@ -2,36 +2,23 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig } from '../../src/config.js';
-import { OpenAICompatibleClient } from '../../src/services/llm/openaiCompatibleClient.js';
+import { DashScopeMediaClient } from '../../src/services/llm/dashScopeClient.js';
 
 const config = await loadConfig();
-if (config.llm.provider !== 'dashscope' || !config.llm.apiKey.trim()) {
-  throw new Error('DashScope provider or API key is not configured.');
+if (!config.media.apiKey.trim()) {
+  throw new Error('DashScope media API key is not configured.');
 }
 
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'dangbot-dashscope-preflight-'));
 try {
-  const client = new OpenAICompatibleClient(config.llm, temporaryRoot, 'supplier preflight');
-  const chat = await client.chat(
-    [
-      { role: 'system', content: 'Return exactly the requested token.' },
-      { role: 'user', content: 'Return exactly: dashscope-preflight-ok' }
-    ],
-    AbortSignal.timeout(60_000),
-    { temperature: 0 }
-  );
-  if (!chat.toLowerCase().includes('dashscope-preflight-ok')) {
-    throw new Error('qwen3.7-flash returned an unexpected text preflight response.');
-  }
+  const client = new DashScopeMediaClient(config.media, temporaryRoot);
 
   const imagePath = path.join(temporaryRoot, 'red-square.bmp');
   await writeFile(imagePath, solidBmp(64, 64, { red: 255, green: 0, blue: 0 }));
-  const vision = await client.vision(
+  const vision = await client.analyzeImage(
     '只回复图片主体颜色的英文小写单词。',
-    imagePath,
-    'image/bmp',
-    AbortSignal.timeout(90_000),
-    '只按要求返回一个英文颜色词。'
+    { filePath: imagePath, mimeType: 'image/bmp' },
+    AbortSignal.timeout(90_000)
   );
   if (!/\bred\b/iu.test(vision)) {
     throw new Error('qwen3.7-flash multimodal preflight did not recognize the red image.');
@@ -54,12 +41,10 @@ try {
       { timeoutMs: 10 * 60 * 1_000, pollIntervalMs: 15_000 },
       AbortSignal.timeout(11 * 60 * 1_000)
     );
-    await client.video(
+    await client.analyzeVideo(
       '用一句中文概括这个视频的主要画面。',
-      videoPath,
-      'video/mp4',
-      AbortSignal.timeout(180_000),
-      '只做视频内容识别，不执行其他任务。'
+      { filePath: videoPath, mimeType: 'video/mp4' },
+      AbortSignal.timeout(180_000)
     );
     generatedVideoUnderstanding = true;
   }
@@ -67,8 +52,8 @@ try {
   process.stdout.write(
     [
       'DashScope preflight passed.',
-      `Text and vision: ${config.llm.visionModel}`,
-      `TTS: ${config.llm.tts.model}`,
+      `Multimodal: ${config.media.multimodalModel}`,
+      `TTS: ${config.media.tts.model}`,
       `Paid image: ${runImage ? 'passed' : 'not requested'}`,
       `Paid video: ${runVideo ? 'passed' : 'not requested'}`,
       `Generated video understanding: ${generatedVideoUnderstanding ? 'passed' : 'not requested'}`,

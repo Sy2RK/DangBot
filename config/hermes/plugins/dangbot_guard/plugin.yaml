@@ -1,0 +1,4 @@
+name: dangbot_guard
+version: 1.0.0
+kind: standalone
+description: Fail-closed approval policy for costly DangBot MCP operations.

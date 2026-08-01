@@ -1,0 +1,3 @@
+name: dangbot_scoped
+version: 1.0.0
+description: DangBot loopback scoped memory provider with per-group and per-user isolation.

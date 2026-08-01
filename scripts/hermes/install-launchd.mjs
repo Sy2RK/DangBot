@@ -30,6 +30,9 @@ if ((serviceEnv.API_SERVER_KEY?.length ?? 0) < 16) {
 if ((serviceEnv.DANGBOT_MCP_API_KEY?.length ?? 0) < 32) {
   throw new Error('Dedicated DANGBOT_MCP_API_KEY must contain at least 32 characters.');
 }
+if ((serviceEnv.DANGBOT_MEMORY_BRIDGE_API_KEY?.length ?? 0) < 32) {
+  throw new Error('Dedicated DANGBOT_MEMORY_BRIDGE_API_KEY must contain at least 32 characters.');
+}
 await mkdir(launchAgents, { recursive: true });
 
 const plist = `<?xml version="1.0" encoding="UTF-8"?>

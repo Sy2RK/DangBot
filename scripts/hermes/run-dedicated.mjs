@@ -22,6 +22,9 @@ if ((env.API_SERVER_KEY?.length ?? 0) < 16) {
 if ((env.DANGBOT_MCP_API_KEY?.length ?? 0) < 32) {
   throw new Error('DANGBOT_MCP_API_KEY must contain at least 32 characters');
 }
+if ((env.DANGBOT_MEMORY_BRIDGE_API_KEY?.length ?? 0) < 32) {
+  throw new Error('DANGBOT_MEMORY_BRIDGE_API_KEY must contain at least 32 characters');
+}
 
 const python = path.join(
   runtimeRoot,
@@ -48,6 +51,8 @@ const child = spawn(
       ...process.env,
       ...env,
       HERMES_HOME: home,
+      NO_PROXY: loopbackNoProxy(process.env.NO_PROXY),
+      no_proxy: loopbackNoProxy(process.env.no_proxy),
       AGENT_BROWSER_PROFILE: '',
       AGENT_BROWSER_STATE: '',
       AGENT_BROWSER_EXTENSIONS: '',
@@ -55,6 +60,7 @@ const child = spawn(
       AGENT_BROWSER_CDP: '',
       AGENT_BROWSER_CONFIG: '',
       AGENT_BROWSER_HEADED: 'false',
+      DANGBOT_MEMORY_BRIDGE_URL: env.DANGBOT_MEMORY_BRIDGE_URL ?? 'http://127.0.0.1:18643',
       AGENT_BROWSER_DOWNLOAD_PATH: path.join(runtimeRoot, 'browser-downloads'),
       PATH: [path.dirname(browserBin), process.env.PATH ?? ''].filter(Boolean).join(path.delimiter)
     }
@@ -99,4 +105,15 @@ async function readEnv(filePath, required) {
     values[key] = value;
   }
   return values;
+}
+
+function loopbackNoProxy(current) {
+  return Array.from(
+    new Set([
+      ...(current ?? '').split(',').map((entry) => entry.trim()).filter(Boolean),
+      '127.0.0.1',
+      'localhost',
+      '::1'
+    ])
+  ).join(',');
 }

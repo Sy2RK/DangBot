@@ -1,123 +1,114 @@
 # DangBot
 
-DangBot is a TypeScript WeChat group agent bot. Wechaty/wechat4u remains the group transport and policy edge. The agent backend is switchable: `legacy` keeps the original Node loop for emergency rollback, while `hermes` sends all planning and tool orchestration to a dedicated, isolated Hermes Agent and keeps attachments, approval, delivery, scheduling, and scoped memory in DangBot.
+DangBot 是一个面向微信群的 Hermes Agent。Wechaty/wechat4u 只负责微信群收发；Node 侧保留身份与权限、限流、任务队列、附件、审批、产物投递和可靠定时唤醒。所有普通对话、意图理解、规划、多步骤工具选择、失败重规划与最终回答都由一套独立的 Hermes Agent 完成，没有旧 Agent 后端和运行时回退开关。
 
-## Quick start
+```mermaid
+flowchart LR
+    W["微信群"] --> E["DangBot 微信边缘层"]
+    E --> H["专属 Hermes :18642"]
+    H --> B["Hermes Web / 隔离浏览器"]
+    H --> T["DangBot 一等 MCP :18643"]
+    T --> D["DashScope 多模态与媒体"]
+    T --> F["文件 / 文档 / QuickJS / 自动任务"]
+    H <--> P["dangbot_scoped MemoryProvider"]
+    T --> A["Artifact Broker"]
+    A --> E
+```
+
+## 固定模型与边界
+
+- 主 Agent：`deepseek-v4-flash`，只在专属 Hermes 中负责对话、规划和工具编排。
+- 图片/视频理解：`qwen3.7-flash`。
+- 图片生成：`qwen-image-3.0-pro`，最多 3 张显式参考图。
+- TTS：`qwen-audio-3.0-tts-flash`。
+- 视频：按输入严格路由 `happyhorse-1.1-t2v`、`happyhorse-1.1-i2v`、`happyhorse-1.1-r2v` 或 `happyhorse-1.0-video-edit`。
+- Web 使用 Hermes 的原生 `web_search` 工具和固定 DDGS 后端，页面交互使用临时未登录浏览器。宿主终端、任意文件读写、Computer Use、消息代发、插件/技能安装、Home Assistant、Hermes Cron、子 Agent 和交互式 clarify 工具均关闭。
+- 代码只在 QuickJS-WASM 中执行纯 JavaScript；没有 Shell、网络、宿主文件系统、`process`、`require` 或模块加载。项目不依赖 Docker。
+
+Hermes 0.19.0 没有原生 DashScope 图片、HappyHorse 视频和 Qwen Audio TTS 插件，因此这些能力通过 loopback MCP 调用。MCP 只提供严格 Schema 的一等工具，不存在 `dangbot_execute_tool` 之类的通用入口。返回值固定为 `{status, summary, artifactIds, data}`，模型看不到宿主绝对路径。
+
+## 初始化
+
+要求 Node.js 20+、pnpm，以及独立 Python 3.11–3.13。专属运行时固定在被 Git 忽略的 `.runtime/hermes/`，不会读取或复制 `~/.hermes`。
 
 ```bash
 pnpm install
 cp config/local.yaml.example config/local.yaml
-pnpm dev
-```
 
-Fill `config/local.yaml` before running against a real WeChat account. The bot only serves authorized rooms. Prefer a stable `stableId` per real group and put Wechaty runtime room IDs under `id`/`runtimeIds`; topic-only binding is disabled by default because group names are not unique. A room can be enabled directly in config; if no admins are configured, DangBot runs in adminless mode.
-
-Sensitive local files are ignored by git: `config/local.yaml`, `data/`, `logs/`, and Wechaty memory-card files.
-
-## Dedicated Hermes backend
-
-The dedicated instance is pinned to `hermes-agent==0.19.0`, listens on `127.0.0.1:18642`, and talks to the loopback-only DangBot MCP service on `127.0.0.1:18643`. Its complete runtime lives under ignored `.runtime/hermes/`; it never reads or modifies `~/.hermes`, and its launcher does not use Hermes profile commands or `--replace`.
-
-```bash
-# Create the isolated Python environment and config.
-pnpm hermes:bootstrap
-
-# Isolated, logged-out agent-browser runtime. It may reuse only a locally
-# installed browser executable; profiles, cookies and sessions stay temporary.
+# 创建固定 hermes-agent==0.19.0、ddgs==9.14.4 的独立 venv、配置和插件
 pnpm hermes:bootstrap:browser
 
-# Optional: download a separate Chrome for Testing binary instead.
-pnpm hermes:bootstrap:browser-download
+# 无回显写入 DangBot 专用 DeepSeek / DashScope 凭据，并生成 API、MCP、
+# Memory Bridge 与 session 独立密钥
+pnpm hermes:configure
 
-# After filling .runtime/hermes/service.env with dedicated credentials:
+# 离线真实 Hermes + 模拟 DeepSeek，不连接微信或供应商
+pnpm hermes:preflight:offline
+
+# 启动专属 Hermes；另一个终端启动 DangBot
 pnpm hermes:run
+pnpm build
+pnpm start
 ```
 
-Run `pnpm hermes:configure -- --backend legacy` and enter the dedicated DeepSeek and DashScope keys through the no-echo prompts. Set `DANGBOT_MCP_API_KEY` while DangBot is still on `legacy` to start MCP for offline verification. Only after both health checks and simulated events pass, set `DANGBOT_HERMES_API_KEY`, `DANGBOT_HERMES_SESSION_SECRET`, and `DANGBOT_AGENT_BACKEND=hermes`, then restart DangBot. DeepSeek `deepseek-v4-flash` is always the planner; DashScope `qwen3.7-flash` handles text and multimodal understanding, while media generation stays behind DangBot MCP and the artifact broker.
+macOS 可用 `pnpm hermes:install:launchd` 安装标签为 `com.sy2rk.dangbot-hermes` 的专属服务。其他平台直接用各自服务管理器运行 `scripts/hermes/run-dedicated.mjs`。完整流程见 [专属 Hermes 运维手册](docs/hermes-backend.md)。
 
-Hermes 0.19.0 has a native DashScope chat provider but no built-in DashScope image, HappyHorse video, or Qwen Audio TTS plugin. DangBot therefore keeps Hermes-native web/browser tools and exposes the DashScope media calls through its loopback MCP. This preserves per-task attachment authorization, cancellation, artifact IDs, and verified WeChat delivery without enabling host file access.
+DangBot 启动前会检查专属 Hermes、MCP、Memory Bridge 和 DashScope 媒体凭据；任一关键依赖未就绪就直接失败，不会回退到旧 Agent。
 
-There is no container runtime dependency. Safe code execution is pure JavaScript in a bounded QuickJS-WASM runtime with no shell, host filesystem, `process`, `require`, or network API. Browser automation uses the dedicated Hermes browser installation and an ephemeral, logged-out session; it never uses the user's Chrome profile or cookies. See [the Hermes operations runbook](docs/hermes-backend.md) for validation, launchd, cutover, and rollback.
+## 微信入口
 
-## Commands in a WeChat group
+普通群消息只进入有上限、24 小时有效的群公开窗口；只有 @ 机器人后才会创建 Agent 任务。除少量必须在边缘执行的管理命令外，原始请求不会预分类，也不会被 Node 指定工具。
 
-All commands must mention the bot, for example `@DangBot 状态`.
+- `@DangBot 状态`、`@DangBot 自检`
+- `@DangBot 清空上下文`：增加个人 session epoch，下一次使用全新 Hermes 会话。
+- `@DangBot 记住：...`：本人直接保存当前群内的个人记忆。
+- `@DangBot 全局记住：...`：管理员直接保存当前群共享记忆，不跨群。
+- `@DangBot 我的记忆`、`@DangBot 全局记忆`：列表会显示可用于精确删除的记忆 ID。
+- `@DangBot 忘记 mem_...`：只删除本人在当前群的指定个人记忆。
+- `@DangBot 清空我的记忆`、`@DangBot 清空全局记忆`
+- `@DangBot 自动化列表`、`暂停第1个`、`恢复第1个`、`删除第1个`
+- `@DangBot 取消` 或 `取消 task_...`
+- `@DangBot 同意` / `拒绝`：只处理当前 Hermes 审批点，只有 allow-once 或 deny。
+- `@DangBot 同意 proposal_...` / `拒绝 proposal_...`：按个人、群或系统管理员作用域审批记忆提案。
+- `@DangBot 记忆提案`：只列出当前身份有权审批的 pending 提案。
 
-- `状态`: show bot status.
-- `/health` / `自检`: run a local self-check and report each capability in DangBot's cat voice.
-- `清空上下文`: clear the caller's context.
-- `记住 ...`: add a persistent memory for the caller in this room.
-- `全局记住 ...`: add a persistent room-shared memory for callers in the current room. The legacy command name remains for compatibility; it never crosses rooms.
-- `我的记忆` / `全局记忆`: show persistent memories.
-- `清空我的记忆` / `清空全局记忆`: clear persistent memories.
-- `提醒我 10分钟后 喝水` / `设置提醒 10分钟后 喝水` / `提醒我每天 09:00 喝水`: create a reminder. Creating, pausing, resuming, and deleting automations require a group admin or system admin when admins are configured; adminless rooms allow normal members to manage them.
-- `定时 每天 09:00 总结群聊` / `设置定时任务 每天 09:00 总结群聊` / `自动化 每30分钟 联网搜索 Qwen 最新消息`: create a recurring scheduled agent request.
-- `自动化列表`: list this room's automations.
-- `暂停第1个` / `恢复第1个` / `删除第1个`: manage an automation by its position in `自动化列表`.
-- `生成图片 ...` / `画一张 ...` / `出图 ...`: use DashScope `qwen-image-3.0-pro`; 1–3 attached images become ordered editing references.
-- `生成语音：今天也要开心呀` / `朗读：...`: use `qwen-audio-3.0-tts-flash` and send a WAV file. Named works can trigger multiple steps: retrieve the text, extract its exact body, then synthesize only that body.
-- `生成视频 ...` / `做个视频 ...` / `出视频 ...`: use HappyHorse. No attachment routes to `happyhorse-1.1-t2v`, one image to `happyhorse-1.1-i2v`, multiple images to `happyhorse-1.1-r2v`, and a source video to `happyhorse-1.0-video-edit`.
-- Send an image and ask `把这张图动起来`: use that image as the first frame. Multiple images become ordered references; a source video plus up to five images becomes a video-edit request.
-- `联网搜索 ...` / `帮我查一下 ...`: search the web, then answer with source URLs. Time-sensitive external topics such as weather, news, prices, schedules, and model releases can also trigger search when the wording implies current information. Casual phrases like `今天午饭吃什么` stay as normal chat.
-- Any other mentioned text is handled as a normal agent request.
+自然语言提醒、自动任务、复合文件处理、搜索、浏览器、媒体和文档请求都直接进入 Hermes。例如“搜索今天的资料，分析刚才的 PDF，再整理成 DOCX”允许 Hermes 连续调用多项独立工具，并在结构化错误后重新规划。可能产生费用但语义不清的请求会先返回普通澄清问题。
 
-## Files And Media
+## 附件与产物
 
-- Supported file/media types: `txt`, `md`, `csv`, `xlsx`, `docx`, `pdf`, `png`, `jpg`, `jpeg`, `webp`, `mp4`, `mpeg`, `mpg`, `mov`, `webm`, and `m4v`.
-- Images sent as regular WeChat file attachments are still classified as images by extension, so follow-up requests like `分析刚才的图` or `把这张图动起来` can use them.
-- Attachments are cached locally for a limited time and are scoped by room and user.
-- Follow-up requests can bind to the sender's recent valid file. Attachment-backed rewrite and translation tasks read the file instead of treating the request as plain chat.
-- Edited `docx`, `txt`, and `md` files are uploaded back in the same file type. Generated DOCX files preserve editable text and paragraph breaks, but complex source styling and embedded objects are not guaranteed to survive.
-- Voice generation calls DashScope Qwen Audio TTS over HTTPS, immediately downloads the signed result, validates the WAV signature, and sends the resulting `.wav` through the existing WeChat file path.
+- 可输入 TXT、MD、CSV、DOCX、PDF、XLSX、PNG/JPEG/WEBP 和常见 MP4/MOV/WEBM 视频。
+- 当前消息附件和同群同用户最近最多 5 个仍有效附件会以逻辑 ID 和安全元数据交给 Hermes；Hermes 必须显式选择 ID。
+- 文本抽取按 `attachmentId + cursor + maxChars` 确定性分页，不调用其他文字模型。
+- 文档渲染只接收 Hermes 已组织好的标题与正文，确定性生成 DOCX/TXT/MD。
+- 每次使用附件前会重新核对上传根目录、内容类型、MIME、大小和 SHA-256；Artifact Broker 对产物再做同类校验。Wechaty 最终发送真实 `FileBox`，不会用路径文字冒充附件。
+- 图片生成按供应商限制全局每分钟 1 次，视频生成全局并发 1，Hermes run 并发 2。取消任务会停止 Hermes run、DashScope 异步任务和 QuickJS，并立即撤销 capability。
 
-## Memory
+Qwen Image 3.0 Pro 需要供应商账号权限。如果供应商返回 403，DangBot 会保留准确的不可用错误；在账号权限开通并完成真实验收前，不应对外宣称图片生成可用。
 
-- `CAPABILITIES.md` is Xiao Dang's local self-capability memory. It is loaded into the system prompt at startup, stays separate from user/global memories, and cannot be cleared by chat commands.
-- Every user-facing feature change must update `CAPABILITIES.md` in the same change so the bot can describe what it can and cannot do accurately in its cat voice.
-- In `legacy` mode, short-term personal context keeps the latest 32 user/assistant messages.
-- Short-term room context keeps the latest 160 public room messages, including normal group chat, mentioned requests, and DangBot task replies.
-- Normal replies keep personal context isolated, but also receive a small recent room-context window so the bot can follow shared group references.
-- Automatic context consolidation only runs in `legacy` mode. The Hermes backend starts new opaque sessions and only receives memories explicitly saved in the current room/user scope; Hermes global memory is disabled.
-- The commands named `全局记住` and `全局记忆` now mean “shared in this room”. Existing legacy rows stored with the old cross-room `*` scope are intentionally not imported into Hermes.
+## 作用域记忆与反思
 
-Manual memories are stored separately from automatic summaries, so explicit `记住 ...` entries are not overwritten by the background consolidation job.
+每个“群 + 用户 + session epoch”拥有独立、不可逆生成的 Hermes 会话。官方 `dangbot_scoped` MemoryProvider 只预取当前用户在当前群的个人记忆、当前群共享记忆和系统管理员批准的 Agent 经验。Hermes 共享 `MEMORY.md/USER.md` 与技能自动写入关闭。
 
-## Tools, Policy, And Automations
+反思由信号触发并批量执行：累计 5 个候选或空闲 15 分钟触发，每批最多 8 个任务，同一会话至少间隔 30 分钟。它复用同一个 Hermes/DeepSeek，但使用独立 reflection session 和 capability，只能调用作用域记忆工具，也不会向微信群回复。
 
-- Built-in tool calls such as web search, file analysis, image/video analysis, and image/video generation are registered in a tool registry and recorded in SQLite.
-- In `legacy` mode, tool-backed requests run through the original bounded Node loop. In `hermes` mode, the Node loop is bypassed: Hermes plans the task and calls only the explicitly allowlisted built-in web/browser tools and DangBot MCP tools.
-- MCP capabilities are random, task-scoped, short-lived, and revoked on completion or cancellation. Tool responses expose only status, a bounded summary, logical artifact IDs, and sanitized data; they never expose host paths.
-- Generated files are realpath-, MIME-, size-, and SHA-256-checked by the artifact broker before Wechaty sends a real attachment.
-- `text.prepare` supports deterministic start/end markers so later tools receive only the intended text instead of titles, instructions, citations, or adjacent content.
-- Speech synthesis is registered as `voice.generate`; the generated WAV uses the normal `file` result kind.
-- Whether a request should invoke speech synthesis is decided by the main LLM intent classifier. Local text matching only strips explicit command wording and blocks narrow unresolved-title placeholders; it does not classify general sentences by suffix.
-- `tools.policy.denyTools` can disable specific tools globally, for example `web.search`; `roomToolOverrides` can scope allow/deny rules to a room.
-- High-risk tools, including video generation, require approval when an approver is configured. Adminless mode keeps the earlier no-approval behavior.
-- Automation definitions are parsed by the text LLM into strict JSON, then validated locally. They support one-time reminders, daily schedules, weekly schedules, and fixed intervals. Before 04:00 local time, `第二天` is treated as the same calendar day for late-night scheduling. Due automations are dispatched after the Wechaty adapter starts and reuse the same task queue and tool policy as normal requests.
+个人记忆仅在置信度不低于 0.95、证据是当前用户原话、无冲突、非敏感、非临时状态且每批最多一条时自动保存；其余交本人审批。群记忆始终由群管理员审批，跨群 Agent 经验始终由系统管理员审批。自动保存会在该用户下一次交互时透明提示。
 
-## Validation
+首次迁移只保留 `source=manual` 的个人/本群记忆；旧自动摘要和 `room_id='*'` 数据会删除。
+
+## 验证
 
 ```bash
 pnpm typecheck
 pnpm lint
 pnpm test
 pnpm build
-pnpm audit --prod
 git diff --check
-pnpm dashscope:preflight
+pnpm audit --prod
+pnpm hermes:preflight:offline
+pnpm hermes:preflight:live       # 专属 Hermes + DeepSeek，不连接微信
+pnpm dashscope:preflight         # 多模态与 TTS；付费媒体需显式参数
 ```
 
-`pnpm dashscope:preflight` makes low-cost text, image-understanding, and TTS calls without connecting to WeChat. Add `-- --image`, `-- --video`, or `-- --paid-media` only when an operator intentionally wants real Qwen Image, HappyHorse, or both generation checks, because those calls create billable media tasks. The video option also feeds the generated MP4 back to `qwen3.7-flash` to verify video understanding.
+`pnpm dashscope:preflight -- --image`、`--video` 或 `--paid-media` 会创建真实付费任务，只应由运维人员显式执行。真实微信群验收清单见 [手工验收](docs/manual-acceptance.md)。
 
-## Important notes
-
-- This MVP does not add friends, create rooms, invite members, or automatically join rooms.
-- Video generation is asynchronous and may take several minutes. DangBot polls DashScope, attempts cancellation after timeout or abort, validates the downloaded MP4, and returns it as a real file.
-- In Hermes mode, web search uses the dedicated Hermes native web/browser tools. Brave Search remains available for legacy mode with `search.provider: brave`; `search.provider: hermes` is deliberately not re-exposed through DangBot MCP.
-- Search prompts include the current Beijing date/time and add a date anchor for time-sensitive queries, so relative phrases such as “today” and “this week” are interpreted against the current Beijing date.
-- `pnpm audit --prod` is expected to pass. The project pins safe overrides and small local compatibility shims for legacy transitive packages in the Wechaty/FileBox chains; revisit these shims when upstream packages publish maintained replacements.
-- Different Wechaty puppet providers have different reliability and platform constraints. Keep the adapter boundary intact when switching providers.
-- Hermes mode never enables host terminal, host file editing, Computer Use, plugin/skill installation, Home Assistant, or arbitrary message sending. Administrators can approve a high-risk operation once or deny it; there is no permanent authorization.
-- `AutomationScheduler` stays in Node and dispatches due work through the selected backend so asynchronous results can still be delivered to the correct WeChat room.
-- DashScope uses `DASHSCOPE_API_KEY` or ignored local configuration. Qwen Audio TTS non-real-time HTTP calls require a China (Beijing) key; Qwen Image 3.0 Pro also requires model access. Keys never belong in tracked files.
-- `config/local.yaml`, `data/`, `logs/`, and `*.memory-card.json` are intentionally ignored by git.
+发布前后必须只读核对现有 `ai.hermes.gateway` 的 PID、launchd 状态、配置哈希和会话目录；不得停止、重启、替换或读取它的凭据。回滚通过恢复上一稳定 Git SHA 和数据库/配置快照完成，只重启 DangBot，不存在运行时旧后端开关。

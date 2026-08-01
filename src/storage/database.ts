@@ -3,7 +3,6 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type {
   AppConfig,
   AttachmentRecord,
-  RequestKind,
   ResultKind,
   RoomConfig,
   RoomState,
@@ -25,7 +24,14 @@ import type {
   ArtifactRecord,
   HermesRunRecord,
   HermesRunStatus,
-  McpContextRecord
+  McpContextRecord,
+  TaskOrigin,
+  HermesSessionRecord,
+  MemoryProposalRecord,
+  MemoryProposalScope,
+  MemoryProposalStatus,
+  AgentLessonRecord,
+  ReflectionBatchRecord
 } from '../types.js';
 import { ensureParentDir } from '../utils/fs.js';
 import { nowIso } from '../utils/time.js';
@@ -142,11 +148,9 @@ export class AppDatabase {
         id TEXT PRIMARY KEY,
         room_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
-        request_type TEXT NOT NULL,
+        origin TEXT NOT NULL DEFAULT 'interactive',
         status TEXT NOT NULL,
         prompt TEXT NOT NULL,
-        tool_name TEXT,
-        tool_input_json TEXT,
         result_kind TEXT,
         result_text TEXT,
         result_path TEXT,
@@ -217,6 +221,7 @@ export class AppDatabase {
         room_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
         role TEXT NOT NULL,
+        purpose TEXT NOT NULL DEFAULT 'interactive',
         attachment_ids_json TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         revoked_at TEXT,
@@ -252,13 +257,10 @@ export class AppDatabase {
         creator_id TEXT NOT NULL,
         name TEXT NOT NULL,
         kind TEXT NOT NULL,
-        request_type TEXT NOT NULL,
         schedule_type TEXT NOT NULL,
         schedule_spec_json TEXT NOT NULL,
         timezone TEXT NOT NULL,
         prompt TEXT NOT NULL,
-        tool_name TEXT,
-        tool_input_json TEXT,
         status TEXT NOT NULL,
         consecutive_failures INTEGER NOT NULL DEFAULT 0,
         last_run_at TEXT,
@@ -270,19 +272,6 @@ export class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(status, next_run_at);
       CREATE INDEX IF NOT EXISTS idx_automations_room ON automations(room_id, created_at);
-
-      CREATE TABLE IF NOT EXISTS contexts (
-        id TEXT PRIMARY KEY,
-        scope TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        user_id TEXT,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_contexts_scope_created
-        ON contexts(scope, room_id, user_id, created_at);
 
       CREATE TABLE IF NOT EXISTS memories (
         id TEXT PRIMARY KEY,
@@ -298,6 +287,97 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_memories_scope_updated
         ON memories(scope, room_id, user_id, updated_at);
 
+      CREATE TABLE IF NOT EXISTS hermes_sessions (
+        session_key_hash TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        epoch INTEGER NOT NULL,
+        purpose TEXT NOT NULL DEFAULT 'interactive',
+        hermes_session_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(room_id, user_id, epoch, purpose)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_hermes_sessions_scope
+        ON hermes_sessions(room_id, user_id, epoch);
+
+      CREATE TABLE IF NOT EXISTS hermes_session_epochs (
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        epoch INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (room_id, user_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_proposals (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        user_id TEXT,
+        content TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        status TEXT NOT NULL,
+        proposer_task_id TEXT,
+        decided_by TEXT,
+        notified_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (proposer_task_id) REFERENCES tasks(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_scope_status
+        ON memory_proposals(scope, room_id, user_id, status, created_at);
+
+      CREATE TABLE IF NOT EXISTS agent_lessons (
+        id TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        approved_by TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS reflection_batches (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        trigger TEXT NOT NULL,
+        task_ids_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        hermes_run_id TEXT,
+        status TEXT NOT NULL,
+        result TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_reflection_batches_scope
+        ON reflection_batches(room_id, user_id, status, created_at);
+
+      CREATE TABLE IF NOT EXISTS reflection_candidates (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        signal TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        consumed_at TEXT,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_reflection_candidates_due
+        ON reflection_candidates(room_id, user_id, consumed_at, created_at);
+
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY,
         room_id TEXT,
@@ -309,22 +389,24 @@ export class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
     `);
-    this.ensureColumn('tasks', 'tool_name', 'TEXT');
-    this.ensureColumn('tasks', 'tool_input_json', 'TEXT');
+    this.ensureColumn('tasks', 'origin', "TEXT NOT NULL DEFAULT 'interactive'");
     this.ensureColumn('approvals', 'tool_name', 'TEXT');
     this.ensureColumn('approvals', 'tool_input_json', 'TEXT');
     this.ensureColumn('approvals', 'policy_reason', 'TEXT');
-    this.ensureColumn('automations', 'request_type', "TEXT NOT NULL DEFAULT 'qa'");
+    this.ensureColumn('mcp_contexts', 'purpose', "TEXT NOT NULL DEFAULT 'interactive'");
+    this.ensureColumn('memory_proposals', 'notified_at', 'TEXT');
+    this.ensureColumn('reflection_batches', 'evidence_json', "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn('memories', 'source', "TEXT NOT NULL DEFAULT 'manual'");
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_memories_source
         ON memories(scope, room_id, user_id, source);
     `);
+    this.applyHermesV2DataMigration();
     this.db.exec(`
       INSERT OR IGNORE INTO room_bindings (
         runtime_id, room_id, topic, source, created_at, updated_at
       )
-      SELECT id, id, topic, 'legacy', created_at, updated_at
+      SELECT id, id, topic, 'observed', created_at, updated_at
       FROM rooms
       WHERE id NOT LIKE 'topic:%';
     `);
@@ -421,7 +503,7 @@ export class AppDatabase {
         room = this.getRoomById(roomId);
       }
       if (!room) return undefined;
-      this.upsertRoomBinding(roomId, room.id, topic ?? room.topic, 'legacy');
+      this.upsertRoomBinding(roomId, room.id, topic ?? room.topic, 'observed');
       return room;
     }
 
@@ -464,7 +546,7 @@ export class AppDatabase {
     runtimeId: string,
     roomId: string,
     topic: string | undefined,
-    source: 'config' | 'legacy' | 'observed' | 'topic'
+    source: 'config' | 'observed' | 'topic'
   ): void {
     const now = nowIso();
     this.db
@@ -611,6 +693,24 @@ export class AppDatabase {
       );
   }
 
+  pruneRoomMessages(roomId: string, limit: number, maxAgeMs = 24 * 60 * 60 * 1_000): number {
+    const safeLimit = Math.max(1, Math.min(limit, 1_000));
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    return this.db
+      .prepare(
+        `
+        DELETE FROM messages
+        WHERE room_id = ? AND (
+          created_at <= ? OR id NOT IN (
+            SELECT id FROM messages WHERE room_id = ?
+            ORDER BY created_at DESC LIMIT ?
+          )
+        )
+      `
+      )
+      .run(roomId, cutoff, roomId, safeLimit).changes;
+  }
+
   addAttachment(record: AttachmentRecord): void {
     this.db
       .prepare(
@@ -682,6 +782,28 @@ export class AppDatabase {
     return row ? normalizeAttachment(row) : undefined;
   }
 
+  listRecentAttachments(roomId: string, userId: string, limit = 5): AttachmentRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM attachments
+        WHERE room_id = ? AND user_id = ? AND expires_at > ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `
+      )
+      .all(roomId, userId, nowIso(), Math.max(1, Math.min(limit, 5))) as DbAttachment[];
+    return rows.map(normalizeAttachment);
+  }
+
+  getAttachment(attachmentId: string): AttachmentRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM attachments WHERE id = ? AND expires_at > ?').get(
+      attachmentId,
+      nowIso()
+    ) as DbAttachment | undefined;
+    return row ? normalizeAttachment(row) : undefined;
+  }
+
   cleanupExpiredAttachments(): number {
     const result = this.db.prepare('DELETE FROM attachments WHERE expires_at <= ?').run(nowIso());
     return result.changes;
@@ -690,11 +812,9 @@ export class AppDatabase {
   createTask(input: {
     roomId: string;
     userId: string;
-    requestType: RequestKind;
+    origin?: TaskOrigin;
     prompt: string;
     status?: TaskStatus;
-    toolName?: string;
-    toolInputJson?: string;
   }): TaskRecord {
     const now = nowIso();
     const id = `task_${randomUUID().slice(0, 8)}`;
@@ -702,21 +822,18 @@ export class AppDatabase {
       .prepare(
         `
         INSERT INTO tasks (
-          id, room_id, user_id, request_type, status, prompt, tool_name, tool_input_json,
-          created_at, updated_at
+          id, room_id, user_id, origin, status, prompt, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `
       )
       .run(
         id,
         input.roomId,
         input.userId,
-        input.requestType,
+        input.origin ?? 'interactive',
         input.status ?? 'received',
         input.prompt,
-        input.toolName,
-        input.toolInputJson,
         now,
         now
       );
@@ -953,6 +1070,7 @@ export class AppDatabase {
     roomId: string;
     userId: string;
     role: UserRole;
+    purpose?: TaskOrigin;
     attachmentIds: string[];
     ttlMs: number;
   }): { token: string; record: McpContextRecord } {
@@ -964,15 +1082,16 @@ export class AppDatabase {
       .prepare(
         `
         INSERT INTO mcp_contexts (
-          token_hash, task_id, room_id, user_id, role, attachment_ids_json,
+          token_hash, task_id, room_id, user_id, role, purpose, attachment_ids_json,
           expires_at, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id) DO UPDATE SET
           token_hash = excluded.token_hash,
           room_id = excluded.room_id,
           user_id = excluded.user_id,
           role = excluded.role,
+          purpose = excluded.purpose,
           attachment_ids_json = excluded.attachment_ids_json,
           expires_at = excluded.expires_at,
           revoked_at = NULL,
@@ -985,6 +1104,7 @@ export class AppDatabase {
         input.roomId,
         input.userId,
         input.role,
+        input.purpose ?? 'interactive',
         JSON.stringify([...new Set(input.attachmentIds)]),
         expiresAt,
         createdAt
@@ -1010,6 +1130,10 @@ export class AppDatabase {
       .prepare('DELETE FROM mcp_contexts WHERE expires_at <= ? OR revoked_at IS NOT NULL')
       .run(nowIso());
     return result.changes;
+  }
+
+  invalidateAllMcpContexts(): number {
+    return this.db.prepare('DELETE FROM mcp_contexts').run().changes;
   }
 
   private getMcpContextByHash(tokenHash: string): McpContextRecord | undefined {
@@ -1146,11 +1270,11 @@ export class AppDatabase {
       .prepare(
         `
         SELECT user_id, text, mentioned, created_at FROM messages
-        WHERE room_id = ? AND trim(COALESCE(text, '')) <> ''
+        WHERE room_id = ? AND created_at > ? AND trim(COALESCE(text, '')) <> ''
         ORDER BY created_at DESC LIMIT ?
       `
       )
-      .all(roomId, limit) as Array<{
+      .all(roomId, new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString(), limit) as Array<{
       user_id: string;
       text: string;
       mentioned: 0 | 1;
@@ -1162,6 +1286,10 @@ export class AppDatabase {
       mentioned: row.mentioned === 1,
       createdAt: row.created_at
     }));
+  }
+
+  clearRoomMessages(roomId: string): number {
+    return this.db.prepare('DELETE FROM messages WHERE room_id = ?').run(roomId).changes;
   }
 
   resolveApproval(taskId: string, approverId: string, approved: boolean): void {
@@ -1197,13 +1325,10 @@ export class AppDatabase {
     creatorId: string;
     name: string;
     kind: AutomationKind;
-    requestType: RequestKind;
     scheduleType: AutomationScheduleType;
     scheduleSpecJson: string;
     timezone: string;
     prompt: string;
-    toolName?: string;
-    toolInputJson?: string;
     nextRunAt?: string;
   }): AutomationRecord {
     const now = nowIso();
@@ -1212,11 +1337,11 @@ export class AppDatabase {
       .prepare(
         `
         INSERT INTO automations (
-          id, room_id, creator_id, name, kind, request_type, schedule_type, schedule_spec_json,
-          timezone, prompt, tool_name, tool_input_json, status, consecutive_failures,
+          id, room_id, creator_id, name, kind, schedule_type, schedule_spec_json,
+          timezone, prompt, status, consecutive_failures,
           next_run_at, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)
       `
       )
       .run(
@@ -1225,13 +1350,10 @@ export class AppDatabase {
         input.creatorId,
         input.name,
         input.kind,
-        input.requestType,
         input.scheduleType,
         input.scheduleSpecJson,
         input.timezone,
         input.prompt,
-        input.toolName,
-        input.toolInputJson,
         input.nextRunAt,
         now,
         now
@@ -1271,6 +1393,10 @@ export class AppDatabase {
   updateAutomation(
     automationId: string,
     patch: {
+      prompt?: string;
+      scheduleType?: AutomationScheduleType;
+      scheduleSpecJson?: string;
+      timezone?: string;
       status?: AutomationStatus;
       consecutiveFailures?: number;
       lastRunAt?: string;
@@ -1284,7 +1410,11 @@ export class AppDatabase {
       .prepare(
         `
         UPDATE automations
-        SET status = @status,
+        SET prompt = @prompt,
+            schedule_type = @scheduleType,
+            schedule_spec_json = @scheduleSpecJson,
+            timezone = @timezone,
+            status = @status,
             consecutive_failures = @consecutiveFailures,
             last_run_at = @lastRunAt,
             next_run_at = @nextRunAt,
@@ -1295,6 +1425,10 @@ export class AppDatabase {
       )
       .run({
         id: automationId,
+        prompt: patch.prompt ?? current.prompt,
+        scheduleType: patch.scheduleType ?? current.scheduleType,
+        scheduleSpecJson: patch.scheduleSpecJson ?? current.scheduleSpecJson,
+        timezone: patch.timezone ?? current.timezone,
         status: patch.status ?? current.status,
         consecutiveFailures: patch.consecutiveFailures ?? current.consecutiveFailures,
         lastRunAt: patch.lastRunAt ?? current.lastRunAt,
@@ -1310,114 +1444,28 @@ export class AppDatabase {
     return result.changes > 0;
   }
 
-  appendContext(input: {
-    scope: 'user' | 'room';
-    roomId: string;
-    userId?: string;
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-  }): void {
-    this.db
-      .prepare(
-        `
-        INSERT INTO contexts (id, scope, room_id, user_id, role, content, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `
-      )
-      .run(
-        `ctx_${randomUUID()}`,
-        input.scope,
-        input.roomId,
-        input.scope === 'user' ? input.userId : null,
-        input.role,
-        input.content,
-        nowIso()
-      );
-  }
-
-  getContext(input: {
-    scope: 'user' | 'room';
-    roomId: string;
-    userId?: string;
-    limit: number;
-  }): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
-    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
-    const rows = this.db
-      .prepare(
-        `
-        SELECT role, content FROM contexts
-        WHERE scope = @scope AND room_id = @roomId ${userPredicate}
-        ORDER BY created_at DESC
-        LIMIT @limit
-      `
-      )
-      .all(input) as Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
-    return rows.reverse();
-  }
-
-  getContextCount(input: { scope: 'user' | 'room'; roomId: string; userId?: string }): number {
-    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
+  findLatestActiveTask(
+    roomId: string,
+    userId: string,
+    purpose?: 'interactive' | 'reflection'
+  ): TaskRecord | undefined {
+    const purposePredicate =
+      purpose === 'reflection'
+        ? "AND origin = 'reflection'"
+        : purpose === 'interactive'
+          ? "AND origin IN ('interactive', 'automation')"
+          : '';
     const row = this.db
       .prepare(
         `
-        SELECT COUNT(*) AS count FROM contexts
-        WHERE scope = @scope AND room_id = @roomId ${userPredicate}
+        SELECT * FROM tasks
+        WHERE room_id = ? AND user_id = ? AND status IN ('received', 'processing', 'waiting_approval')
+          ${purposePredicate}
+        ORDER BY created_at DESC LIMIT 1
       `
       )
-      .get(input) as { count: number };
-    return row.count;
-  }
-
-  listUserContextStats(): Array<{
-    roomId: string;
-    userId: string;
-    count: number;
-    lastCreatedAt: string;
-  }> {
-    return this.db
-      .prepare(
-        `
-        SELECT room_id AS roomId, user_id AS userId, COUNT(*) AS count, MAX(created_at) AS lastCreatedAt
-        FROM contexts
-        WHERE scope = 'user' AND user_id IS NOT NULL
-        GROUP BY room_id, user_id
-      `
-      )
-      .all() as Array<{ roomId: string; userId: string; count: number; lastCreatedAt: string }>;
-  }
-
-  trimContext(input: {
-    scope: 'user' | 'room';
-    roomId: string;
-    userId?: string;
-    keep: number;
-  }): number {
-    if (input.keep <= 0) return this.clearContext(input);
-
-    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
-    const result = this.db
-      .prepare(
-        `
-        DELETE FROM contexts
-        WHERE scope = @scope AND room_id = @roomId ${userPredicate}
-          AND rowid NOT IN (
-            SELECT rowid FROM contexts
-            WHERE scope = @scope AND room_id = @roomId ${userPredicate}
-            ORDER BY created_at DESC
-            LIMIT @keep
-          )
-      `
-      )
-      .run(input);
-    return result.changes;
-  }
-
-  clearContext(input: { scope: 'user' | 'room'; roomId: string; userId?: string }): number {
-    const userPredicate = input.scope === 'user' ? 'AND user_id = @userId' : 'AND user_id IS NULL';
-    const result = this.db
-      .prepare(`DELETE FROM contexts WHERE scope = @scope AND room_id = @roomId ${userPredicate}`)
-      .run(input);
-    return result.changes;
+      .get(roomId, userId) as DbTask | undefined;
+    return row ? normalizeTask(row) : undefined;
   }
 
   addMemory(input: {
@@ -1534,6 +1582,422 @@ export class AppDatabase {
     return result.changes;
   }
 
+  deleteUserMemory(memoryId: string, roomId: string, userId: string): boolean {
+    const result = this.db
+      .prepare(
+        "DELETE FROM memories WHERE id = ? AND scope = 'user' AND room_id = ? AND user_id = ?"
+      )
+      .run(memoryId, roomId, userId);
+    return result.changes > 0;
+  }
+
+  getSessionEpoch(roomId: string, userId: string, purpose: TaskOrigin = 'interactive'): number {
+    if (purpose === 'interactive') {
+      const state = this.db
+        .prepare('SELECT epoch FROM hermes_session_epochs WHERE room_id = ? AND user_id = ?')
+        .get(roomId, userId) as { epoch: number } | undefined;
+      if (state) return state.epoch;
+    }
+    const row = this.db
+      .prepare(
+        'SELECT MAX(epoch) AS epoch FROM hermes_sessions WHERE room_id = ? AND user_id = ? AND purpose = ?'
+      )
+      .get(roomId, userId, purpose) as { epoch?: number | null };
+    return row.epoch ?? 0;
+  }
+
+  upsertHermesSession(input: {
+    sessionKeyHash: string;
+    roomId: string;
+    userId: string;
+    epoch: number;
+    purpose: TaskOrigin;
+    hermesSessionId: string;
+  }): HermesSessionRecord {
+    const now = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO hermes_sessions (
+          session_key_hash, room_id, user_id, epoch, purpose, hermes_session_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(room_id, user_id, epoch, purpose) DO UPDATE SET
+          session_key_hash = excluded.session_key_hash,
+          hermes_session_id = excluded.hermes_session_id,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(
+        input.sessionKeyHash,
+        input.roomId,
+        input.userId,
+        input.epoch,
+        input.purpose,
+        input.hermesSessionId,
+        now,
+        now
+      );
+    if (input.purpose === 'interactive') {
+      this.db
+        .prepare(
+          `
+          INSERT INTO hermes_session_epochs (room_id, user_id, epoch, updated_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(room_id, user_id) DO UPDATE SET
+            epoch = MAX(hermes_session_epochs.epoch, excluded.epoch),
+            updated_at = excluded.updated_at
+        `
+        )
+        .run(input.roomId, input.userId, input.epoch, now);
+    }
+    return this.getHermesSessionByHash(input.sessionKeyHash)!;
+  }
+
+  getHermesSessionByHash(sessionKeyHash: string): HermesSessionRecord | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM hermes_sessions WHERE session_key_hash = ?')
+      .get(sessionKeyHash) as DbHermesSession | undefined;
+    return row ? normalizeHermesSession(row) : undefined;
+  }
+
+  rotateHermesSession(roomId: string, userId: string): number {
+    const nextEpoch = this.getSessionEpoch(roomId, userId, 'interactive') + 1;
+    this.db
+      .prepare(
+        `
+        INSERT INTO hermes_session_epochs (room_id, user_id, epoch, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(room_id, user_id) DO UPDATE SET
+          epoch = excluded.epoch,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(roomId, userId, nextEpoch, nowIso());
+    this.addAudit({ roomId, userId, action: 'hermes_session_rotated', details: { nextEpoch } });
+    return nextEpoch;
+  }
+
+  addMemoryProposal(input: {
+    scope: MemoryProposalScope;
+    roomId: string;
+    userId?: string;
+    content: string;
+    evidence: string;
+    confidence: number;
+    status?: MemoryProposalStatus;
+    proposerTaskId?: string;
+  }): MemoryProposalRecord {
+    const now = nowIso();
+    const id = `proposal_${randomUUID().slice(0, 12)}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO memory_proposals (
+          id, scope, room_id, user_id, content, evidence, confidence, status,
+          proposer_task_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        id,
+        input.scope,
+        input.roomId,
+        input.userId,
+        input.content.trim(),
+        input.evidence.trim(),
+        Math.max(0, Math.min(1, input.confidence)),
+        input.status ?? 'pending',
+        input.proposerTaskId,
+        now,
+        now
+      );
+    return this.getMemoryProposal(id)!;
+  }
+
+  getMemoryProposal(id: string): MemoryProposalRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM memory_proposals WHERE id = ?').get(id) as
+      | DbMemoryProposal
+      | undefined;
+    return row ? normalizeMemoryProposal(row) : undefined;
+  }
+
+  listMemoryProposals(input: {
+    roomId: string;
+    userId?: string;
+    status?: MemoryProposalStatus;
+    limit?: number;
+  }): MemoryProposalRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM memory_proposals
+        WHERE room_id = @roomId
+          AND (@userId IS NULL OR user_id = @userId)
+          AND (@status IS NULL OR status = @status)
+        ORDER BY created_at DESC LIMIT @limit
+      `
+      )
+      .all({
+        roomId: input.roomId,
+        userId: input.userId ?? null,
+        status: input.status ?? null,
+        limit: Math.max(1, Math.min(input.limit ?? 20, 100))
+      }) as DbMemoryProposal[];
+    return rows.map(normalizeMemoryProposal);
+  }
+
+  resolveMemoryProposal(
+    proposalId: string,
+    approved: boolean,
+    decidedBy: string
+  ): MemoryProposalRecord | undefined {
+    const proposal = this.getMemoryProposal(proposalId);
+    if (!proposal || proposal.status !== 'pending') return proposal;
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          'UPDATE memory_proposals SET status = ?, decided_by = ?, updated_at = ? WHERE id = ?'
+        )
+        .run(approved ? 'approved' : 'rejected', decidedBy, nowIso(), proposalId);
+      if (!approved) return;
+      if (proposal.scope === 'agent') {
+        this.addAgentLesson({
+          content: proposal.content,
+          evidence: proposal.evidence,
+          confidence: proposal.confidence,
+          approvedBy: decidedBy
+        });
+      } else {
+        this.addMemory({
+          scope: proposal.scope,
+          roomId: proposal.roomId,
+          userId: proposal.scope === 'user' ? proposal.userId : undefined,
+          source: `proposal:${proposal.id}`,
+          content: proposal.content
+        });
+      }
+    });
+    tx();
+    return this.getMemoryProposal(proposalId);
+  }
+
+  listUnnotifiedAutoMemoryProposals(roomId: string, userId: string): MemoryProposalRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM memory_proposals
+        WHERE room_id = ? AND user_id = ? AND scope = 'user'
+          AND status = 'auto_approved' AND notified_at IS NULL
+        ORDER BY created_at LIMIT 10
+      `
+      )
+      .all(roomId, userId) as DbMemoryProposal[];
+    return rows.map(normalizeMemoryProposal);
+  }
+
+  markMemoryProposalsNotified(ids: string[]): void {
+    if (ids.length === 0) return;
+    const update = this.db.prepare(
+      "UPDATE memory_proposals SET notified_at = ?, updated_at = ? WHERE id = ? AND notified_at IS NULL"
+    );
+    const tx = this.db.transaction(() => {
+      const now = nowIso();
+      for (const id of ids) update.run(now, now, id);
+    });
+    tx();
+  }
+
+  addAgentLesson(input: {
+    content: string;
+    evidence: string;
+    confidence: number;
+    approvedBy: string;
+  }): AgentLessonRecord {
+    const id = `lesson_${randomUUID().slice(0, 12)}`;
+    const now = nowIso();
+    this.db
+      .prepare(
+        `
+        INSERT INTO agent_lessons (
+          id, content, evidence, confidence, approved_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        id,
+        input.content.trim(),
+        input.evidence.trim(),
+        Math.max(0, Math.min(1, input.confidence)),
+        input.approvedBy,
+        now,
+        now
+      );
+    return this.listAgentLessons(100).find((lesson) => lesson.id === id)!;
+  }
+
+  listAgentLessons(limit = 20): AgentLessonRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT * FROM agent_lessons WHERE revoked_at IS NULL
+        ORDER BY updated_at DESC LIMIT ?
+      `
+      )
+      .all(Math.max(1, Math.min(limit, 100))) as DbAgentLesson[];
+    return rows.map(normalizeAgentLesson).reverse();
+  }
+
+  revokeAgentLesson(id: string): boolean {
+    const result = this.db
+      .prepare('UPDATE agent_lessons SET revoked_at = ?, updated_at = ? WHERE id = ?')
+      .run(nowIso(), nowIso(), id);
+    return result.changes > 0;
+  }
+
+  addReflectionCandidate(input: {
+    roomId: string;
+    userId: string;
+    taskId: string;
+    signal: string;
+    evidence: string;
+  }): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO reflection_candidates (
+          id, room_id, user_id, task_id, signal, evidence, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        `candidate_${randomUUID().slice(0, 12)}`,
+        input.roomId,
+        input.userId,
+        input.taskId,
+        input.signal,
+        input.evidence.slice(0, 4_000),
+        nowIso()
+      );
+  }
+
+  listReflectionCandidateGroups(): Array<{
+    roomId: string;
+    userId: string;
+    count: number;
+    oldestAt: string;
+  }> {
+    return this.db
+      .prepare(
+        `
+        SELECT room_id AS roomId, user_id AS userId, COUNT(*) AS count,
+               MIN(created_at) AS oldestAt
+        FROM reflection_candidates WHERE consumed_at IS NULL
+        GROUP BY room_id, user_id
+      `
+      )
+      .all() as Array<{ roomId: string; userId: string; count: number; oldestAt: string }>;
+  }
+
+  createReflectionBatch(input: {
+    roomId: string;
+    userId: string;
+    trigger: 'threshold' | 'idle' | 'manual';
+    maxTasks: number;
+  }): ReflectionBatchRecord | undefined {
+    const candidates = this.db
+      .prepare(
+        `
+        SELECT id, task_id, signal, evidence FROM reflection_candidates
+        WHERE room_id = ? AND user_id = ? AND consumed_at IS NULL
+        ORDER BY created_at LIMIT ?
+      `
+      )
+      .all(input.roomId, input.userId, Math.max(1, Math.min(input.maxTasks, 8))) as Array<{
+      id: string;
+      task_id: string;
+      signal: string;
+      evidence: string;
+    }>;
+    if (candidates.length === 0) return undefined;
+    const id = `reflection_${randomUUID().slice(0, 12)}`;
+    const now = nowIso();
+    const taskIds = [...new Set(candidates.map((entry) => entry.task_id))];
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `
+          INSERT INTO reflection_batches (
+            id, room_id, user_id, trigger, task_ids_json, evidence_json, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        `
+        )
+        .run(
+          id,
+          input.roomId,
+          input.userId,
+          input.trigger,
+          JSON.stringify(taskIds),
+          JSON.stringify(
+            candidates.map((candidate) => ({
+              taskId: candidate.task_id,
+              signal: candidate.signal,
+              evidence: candidate.evidence
+            }))
+          ),
+          now,
+          now
+        );
+      const mark = this.db.prepare(
+        'UPDATE reflection_candidates SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL'
+      );
+      for (const candidate of candidates) mark.run(now, candidate.id);
+    });
+    tx();
+    return this.getReflectionBatch(id)!;
+  }
+
+  getReflectionBatch(id: string): ReflectionBatchRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM reflection_batches WHERE id = ?').get(id) as
+      | DbReflectionBatch
+      | undefined;
+    return row ? normalizeReflectionBatch(row) : undefined;
+  }
+
+  updateReflectionBatch(
+    id: string,
+    patch: { status: ReflectionBatchRecord['status']; hermesRunId?: string; result?: string }
+  ): ReflectionBatchRecord | undefined {
+    const current = this.getReflectionBatch(id);
+    if (!current) return undefined;
+    this.db
+      .prepare(
+        `
+        UPDATE reflection_batches SET status = ?, hermes_run_id = ?, result = ?, updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .run(
+        patch.status,
+        patch.hermesRunId ?? current.hermesRunId,
+        patch.result ?? current.result,
+        nowIso(),
+        id
+      );
+    return this.getReflectionBatch(id);
+  }
+
+  latestReflectionAt(roomId: string, userId: string): string | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT MAX(created_at) AS created_at FROM reflection_batches
+        WHERE room_id = ? AND user_id = ?
+      `
+      )
+      .get(roomId, userId) as { created_at?: string | null };
+    return row.created_at ?? undefined;
+  }
+
   addAudit(input: { roomId?: string; userId?: string; action: string; details?: unknown }): void {
     this.db
       .prepare(
@@ -1566,6 +2030,50 @@ export class AppDatabase {
     if (columns.some((column) => column.name === columnName)) return;
     this.db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`).run();
   }
+
+  private hasColumn(tableName: string, columnName: string): boolean {
+    const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+      name: string;
+    }>;
+    return columns.some((column) => column.name === columnName);
+  }
+
+  private applyHermesV2DataMigration(): void {
+    const applied = this.db
+      .prepare('SELECT 1 AS applied FROM schema_migrations WHERE id = ?')
+      .get('hermes_v2') as { applied: number } | undefined;
+    if (!applied) {
+      const tx = this.db.transaction(() => {
+        // Only explicit user-authored memories survive the migration. The old
+        // wildcard room was cross-room state and is intentionally discarded.
+        this.db.prepare("DELETE FROM memories WHERE source <> 'manual' OR room_id = '*'").run();
+        this.db.prepare("UPDATE memories SET scope = 'room' WHERE scope = 'global'").run();
+        this.db.prepare("UPDATE automations SET kind = 'scheduled_prompt' WHERE kind = 'scheduled_tool'").run();
+        this.db.prepare("UPDATE room_bindings SET source = 'observed' WHERE source = 'legacy'").run();
+        this.db.prepare('DROP TABLE IF EXISTS contexts').run();
+        this.db
+          .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+          .run('hermes_v2', nowIso());
+      });
+      tx();
+    }
+
+    // SQLite supports DROP COLUMN on all supported DangBot runtimes. These
+    // fields encoded the removed Node classifier/agent route and must not stay
+    // available to new code as a shadow planning channel.
+    for (const [table, column] of [
+      ['tasks', 'request_type'],
+      ['tasks', 'tool_name'],
+      ['tasks', 'tool_input_json'],
+      ['automations', 'request_type'],
+      ['automations', 'tool_name'],
+      ['automations', 'tool_input_json']
+    ] as const) {
+      if (this.hasColumn(table, column)) {
+        this.db.prepare(`ALTER TABLE ${table} DROP COLUMN ${column}`).run();
+      }
+    }
+  }
 }
 
 interface DbRoom {
@@ -1582,9 +2090,13 @@ const roomScopedTables = [
   'approvals',
   'tool_calls',
   'automations',
-  'contexts',
   'memories',
   'mcp_contexts',
+  'hermes_sessions',
+  'hermes_session_epochs',
+  'memory_proposals',
+  'reflection_batches',
+  'reflection_candidates',
   'audit_logs'
 ] as const;
 
@@ -1606,6 +2118,7 @@ interface DbMcpContext {
   room_id: string;
   user_id: string;
   role: UserRole;
+  purpose: TaskOrigin;
   attachment_ids_json: string;
   expires_at: string;
   revoked_at?: string | null;
@@ -1627,15 +2140,64 @@ interface DbArtifact {
   delivered_at?: string | null;
 }
 
+interface DbHermesSession {
+  session_key_hash: string;
+  room_id: string;
+  user_id: string;
+  epoch: number;
+  purpose: TaskOrigin;
+  hermes_session_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbMemoryProposal {
+  id: string;
+  scope: MemoryProposalScope;
+  room_id: string;
+  user_id?: string | null;
+  content: string;
+  evidence: string;
+  confidence: number;
+  status: MemoryProposalStatus;
+  proposer_task_id?: string | null;
+  decided_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbAgentLesson {
+  id: string;
+  content: string;
+  evidence: string;
+  confidence: number;
+  approved_by: string;
+  revoked_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbReflectionBatch {
+  id: string;
+  room_id: string;
+  user_id: string;
+  trigger: ReflectionBatchRecord['trigger'];
+  task_ids_json: string;
+  evidence_json: string;
+  hermes_run_id?: string | null;
+  status: ReflectionBatchRecord['status'];
+  result?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 interface DbTask {
   id: string;
   room_id: string;
   user_id: string;
-  request_type: RequestKind;
+  origin: TaskOrigin;
   status: TaskStatus;
   prompt: string;
-  tool_name?: string | null;
-  tool_input_json?: string | null;
   result_kind?: ResultKind;
   result_text?: string;
   result_path?: string;
@@ -1668,13 +2230,10 @@ interface DbAutomation {
   creator_id: string;
   name: string;
   kind: AutomationKind;
-  request_type: RequestKind;
   schedule_type: AutomationScheduleType;
   schedule_spec_json: string;
   timezone: string;
   prompt: string;
-  tool_name?: string | null;
-  tool_input_json?: string | null;
   status: AutomationStatus;
   consecutive_failures: number;
   last_run_at?: string | null;
@@ -1725,11 +2284,9 @@ function normalizeTask(row: DbTask): TaskRecord {
     id: row.id,
     roomId: row.room_id,
     userId: row.user_id,
-    requestType: row.request_type,
+    origin: row.origin,
     status: row.status,
     prompt: row.prompt,
-    toolName: row.tool_name ?? undefined,
-    toolInputJson: row.tool_input_json ?? undefined,
     resultKind: row.result_kind,
     resultText: row.result_text,
     resultPath: row.result_path,
@@ -1768,6 +2325,7 @@ function normalizeMcpContext(row: DbMcpContext): McpContextRecord {
     roomId: row.room_id,
     userId: row.user_id,
     role: row.role,
+    purpose: row.purpose,
     attachmentIds,
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at ?? undefined,
@@ -1789,6 +2347,95 @@ function normalizeArtifact(row: DbArtifact): ArtifactRecord {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     deliveredAt: row.delivered_at ?? undefined
+  };
+}
+
+function normalizeHermesSession(row: DbHermesSession): HermesSessionRecord {
+  return {
+    sessionKeyHash: row.session_key_hash,
+    roomId: row.room_id,
+    userId: row.user_id,
+    epoch: row.epoch,
+    purpose: row.purpose,
+    hermesSessionId: row.hermes_session_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function normalizeMemoryProposal(row: DbMemoryProposal): MemoryProposalRecord {
+  return {
+    id: row.id,
+    scope: row.scope,
+    roomId: row.room_id,
+    userId: row.user_id ?? undefined,
+    content: row.content,
+    evidence: row.evidence,
+    confidence: row.confidence,
+    status: row.status,
+    proposerTaskId: row.proposer_task_id ?? undefined,
+    decidedBy: row.decided_by ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function normalizeAgentLesson(row: DbAgentLesson): AgentLessonRecord {
+  return {
+    id: row.id,
+    content: row.content,
+    evidence: row.evidence,
+    confidence: row.confidence,
+    approvedBy: row.approved_by,
+    revokedAt: row.revoked_at ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function normalizeReflectionBatch(row: DbReflectionBatch): ReflectionBatchRecord {
+  let taskIds: string[] = [];
+  let evidence: ReflectionBatchRecord['evidence'] = [];
+  try {
+    const parsed = JSON.parse(row.task_ids_json) as unknown;
+    if (Array.isArray(parsed)) {
+      taskIds = parsed.filter((value): value is string => typeof value === 'string');
+    }
+  } catch {
+    taskIds = [];
+  }
+  try {
+    const parsed = JSON.parse(row.evidence_json) as unknown;
+    if (Array.isArray(parsed)) {
+      evidence = parsed.filter(
+        (value): value is ReflectionBatchRecord['evidence'][number] =>
+          Boolean(
+            value &&
+              typeof value === 'object' &&
+              'taskId' in value &&
+              typeof value.taskId === 'string' &&
+              'signal' in value &&
+              typeof value.signal === 'string' &&
+              'evidence' in value &&
+              typeof value.evidence === 'string'
+          )
+      );
+    }
+  } catch {
+    evidence = [];
+  }
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    userId: row.user_id,
+    trigger: row.trigger,
+    taskIds,
+    evidence,
+    hermesRunId: row.hermes_run_id ?? undefined,
+    status: row.status,
+    result: row.result ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -1823,13 +2470,10 @@ function normalizeAutomation(row: DbAutomation): AutomationRecord {
     creatorId: row.creator_id,
     name: row.name,
     kind: row.kind,
-    requestType: row.request_type,
     scheduleType: row.schedule_type,
     scheduleSpecJson: row.schedule_spec_json,
     timezone: row.timezone,
     prompt: row.prompt,
-    toolName: row.tool_name ?? undefined,
-    toolInputJson: row.tool_input_json ?? undefined,
     status: row.status,
     consecutiveFailures: row.consecutive_failures,
     lastRunAt: row.last_run_at ?? undefined,

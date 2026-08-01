@@ -6,7 +6,7 @@ max_concurrent_sessions: 2
 
 agent:
   max_turns: 30
-  gateway_timeout: 600
+  gateway_timeout: 900
   disabled_toolsets:
     - terminal
     - file
@@ -33,9 +33,19 @@ agent:
     - computer_use
 
 memory:
+  provider: dangbot_scoped
   memory_enabled: false
   user_profile_enabled: false
   write_approval: true
+
+approvals:
+  mode: manual
+  timeout: 300
+  cron_mode: deny
+
+plugins:
+  enabled:
+    - dangbot_guard
 
 platform_toolsets:
   api_server:
@@ -57,7 +67,7 @@ browser:
   command_timeout: 30
 
 web:
-  backend: native
+  backend: ddgs
   extract_char_limit: 15000
 
 mcp_servers:
@@ -71,12 +81,23 @@ mcp_servers:
     supports_parallel_tool_calls: false
     tools:
       include:
-        - dangbot_capabilities
-        - dangbot_execute_tool
-        - dangbot_list_memories
-        - dangbot_list_attachments
+        - dangbot_attachment_list
+        - dangbot_file_extract
+        - dangbot_image_analyze
+        - dangbot_video_analyze
+        - dangbot_image_generate
+        - dangbot_video_generate
+        - dangbot_tts_generate
+        - dangbot_document_render
         - dangbot_room_context
-        - dangbot_execute_javascript
+        - dangbot_javascript_execute
+        - dangbot_automation_create
+        - dangbot_automation_list
+        - dangbot_automation_update
+        - dangbot_automation_delete
+        - dangbot_memory_recall
+        - dangbot_memory_propose
+        - dangbot_memory_feedback
 
 gateway:
   strict: true

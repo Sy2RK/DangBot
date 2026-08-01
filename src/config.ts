@@ -20,16 +20,6 @@ const booleanishSchema = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
-const optionalEnvStringSchema = z.preprocess(
-  (value) => (value === '' ? undefined : value),
-  z.string().optional()
-);
-
-const optionalSearchEngineSchema = z.preprocess(
-  (value) => (value === '' ? undefined : value),
-  z.enum(['auto', 'native', 'exa', 'firecrawl', 'parallel']).optional()
-);
-
 const configSchema = z.object({
   bot: z.object({
     name: z.string().min(1).default('DangBot'),
@@ -50,23 +40,22 @@ const configSchema = z.object({
   }),
   agent: z
     .object({
-      backend: z.enum(['legacy', 'hermes']).default('legacy'),
       hermes: z
         .object({
           baseURL: z.string().url().default('http://127.0.0.1:18642'),
           apiKey: z.string().default(''),
           sessionSecret: z.string().default(''),
-          model: z.string().min(1).default('deepseek-v4-flash'),
-          requestTimeoutMs: z.number().int().positive().default(300_000),
+          model: z.literal('deepseek-v4-flash').default('deepseek-v4-flash'),
+          requestTimeoutMs: z.number().int().positive().default(900_000),
           pollIntervalMs: z.number().int().min(100).default(1_000),
-          maxConcurrentRuns: z.number().int().min(1).max(8).default(2)
+          maxConcurrentRuns: z.number().int().min(1).max(2).default(2)
         })
         .default({
           baseURL: 'http://127.0.0.1:18642',
           apiKey: '',
           sessionSecret: '',
           model: 'deepseek-v4-flash',
-          requestTimeoutMs: 300_000,
+          requestTimeoutMs: 900_000,
           pollIntervalMs: 1_000,
           maxConcurrentRuns: 2
         }),
@@ -89,6 +78,12 @@ const configSchema = z.object({
           apiKey: '',
           contextTtlMs: 10 * 60 * 1_000
         }),
+      memoryBridge: z
+        .object({
+          baseURL: z.string().url().default('http://127.0.0.1:18643'),
+          apiKey: z.string().default('')
+        })
+        .default({ baseURL: 'http://127.0.0.1:18643', apiKey: '' }),
       sandbox: z
         .object({
           enabled: booleanishSchema.default(true),
@@ -108,13 +103,12 @@ const configSchema = z.object({
         })
     })
     .default({
-      backend: 'legacy',
       hermes: {
         baseURL: 'http://127.0.0.1:18642',
         apiKey: '',
         sessionSecret: '',
         model: 'deepseek-v4-flash',
-        requestTimeoutMs: 300_000,
+        requestTimeoutMs: 900_000,
         pollIntervalMs: 1_000,
         maxConcurrentRuns: 2
       },
@@ -125,6 +119,7 @@ const configSchema = z.object({
         apiKey: '',
         contextTtlMs: 10 * 60 * 1_000
       },
+      memoryBridge: { baseURL: 'http://127.0.0.1:18643', apiKey: '' },
       sandbox: {
         enabled: true,
         maxExecutionMs: 2_000,
@@ -132,21 +127,21 @@ const configSchema = z.object({
         maxOutputChars: 8_000
       }
     }),
-  llm: z.object({
-    provider: z.enum(['openai-compatible', 'dashscope']).default('openai-compatible'),
-    baseURL: z.string().url().default('https://api.openai.com/v1'),
+  media: z.object({
+    baseURL: z
+      .string()
+      .url()
+      .default('https://dashscope.aliyuncs.com/compatible-mode/v1'),
     nativeBaseURL: z.string().url().default('https://dashscope.aliyuncs.com/api/v1'),
     apiKey: z.string().default(''),
-    textModel: z.string().default('gpt-4.1-mini'),
-    visionModel: z.string().default('gpt-4.1-mini'),
-    imageModel: z.string().optional(),
-    videoModel: z.string().optional(),
+    multimodalModel: z.literal('qwen3.7-flash').default('qwen3.7-flash'),
+    imageModel: z.literal('qwen-image-3.0-pro').default('qwen-image-3.0-pro'),
     videoModels: z
       .object({
-        textToVideo: z.string().min(1).default('happyhorse-1.1-t2v'),
-        imageToVideo: z.string().min(1).default('happyhorse-1.1-i2v'),
-        referenceToVideo: z.string().min(1).default('happyhorse-1.1-r2v'),
-        videoEdit: z.string().min(1).default('happyhorse-1.0-video-edit')
+        textToVideo: z.literal('happyhorse-1.1-t2v').default('happyhorse-1.1-t2v'),
+        imageToVideo: z.literal('happyhorse-1.1-i2v').default('happyhorse-1.1-i2v'),
+        referenceToVideo: z.literal('happyhorse-1.1-r2v').default('happyhorse-1.1-r2v'),
+        videoEdit: z.literal('happyhorse-1.0-video-edit').default('happyhorse-1.0-video-edit')
       })
       .default({
         textToVideo: 'happyhorse-1.1-t2v',
@@ -157,95 +152,24 @@ const configSchema = z.object({
     tts: z
       .object({
         enabled: booleanishSchema.default(false),
-        provider: z.enum(['doubao', 'dashscope']).default('doubao'),
-        baseURL: z.string().url().default('https://openspeech.bytedance.com/api/v3'),
         apiKey: z.string().default(''),
-        model: z.string().min(1).default('qwen-audio-3.0-tts-flash'),
-        resourceId: z.string().min(1).default('seed-tts-2.0'),
-        voice: z.string().min(1).default('zh_male_tiancaitongsheng_uranus_bigtts'),
-        speechRate: z.number().int().min(-50).max(100).default(0)
+        model: z.literal('qwen-audio-3.0-tts-flash').default('qwen-audio-3.0-tts-flash'),
+        voice: z.string().min(1).default('longanhuan_v3.6')
       })
       .default({
         enabled: false,
-        provider: 'doubao',
-        baseURL: 'https://openspeech.bytedance.com/api/v3',
         apiKey: '',
         model: 'qwen-audio-3.0-tts-flash',
-        resourceId: 'seed-tts-2.0',
-        voice: 'zh_male_tiancaitongsheng_uranus_bigtts',
-        speechRate: 0
+        voice: 'longanhuan_v3.6'
       })
   }),
-  search: z
-    .object({
-      enabled: booleanishSchema.default(false),
-      provider: z.enum(['openrouter', 'brave', 'hermes']).default('openrouter'),
-      braveApiKey: z.string().default(''),
-      engine: optionalSearchEngineSchema,
-      searchContextSize: z.enum(['low', 'medium', 'high']).default('medium'),
-      count: z.number().int().min(1).max(20).default(5),
-      country: optionalEnvStringSchema,
-      searchLang: optionalEnvStringSchema,
-      uiLang: optionalEnvStringSchema,
-      safeSearch: z.enum(['off', 'moderate', 'strict']).default('moderate'),
-      extraSnippets: z.boolean().default(true)
-    })
-    .default({
-      enabled: false,
-      provider: 'openrouter',
-      braveApiKey: '',
-      searchContextSize: 'medium',
-      count: 5,
-      safeSearch: 'moderate',
-      extraSnippets: true
-    }),
-  tools: z
-    .object({
-      policy: z
-        .object({
-          defaultHighRiskRequiresApproval: z.boolean().default(true),
-          allowNetworkTools: z.boolean().default(true),
-          allowFileWriteTools: z.boolean().default(false),
-          maxToolOutputChars: z.number().int().positive().default(8000),
-          denyTools: z.array(z.string()).default([]),
-          roomToolOverrides: z
-            .array(
-              z.object({
-                roomId: z.string(),
-                denyTools: z.array(z.string()).default([]),
-                allowTools: z.array(z.string()).default([])
-              })
-            )
-            .default([])
-        })
-        .default({
-          defaultHighRiskRequiresApproval: true,
-          allowNetworkTools: true,
-          allowFileWriteTools: false,
-          maxToolOutputChars: 8000,
-          denyTools: [],
-          roomToolOverrides: []
-        })
-    })
-    .default({
-      policy: {
-        defaultHighRiskRequiresApproval: true,
-        allowNetworkTools: true,
-        allowFileWriteTools: false,
-        maxToolOutputChars: 8000,
-        denyTools: [],
-        roomToolOverrides: []
-      }
-    }),
   limits: z.object({
     userRequestsPerMinute: z.number().int().positive().default(6),
     roomRequestsPerMinute: z.number().int().positive().default(30),
-    fileTasksPerMinute: z.number().int().positive().default(3),
     imageTasksPerMinute: z.number().int().positive().default(6),
+    imageGenerationTasksPerMinute: z.number().int().positive().max(1).default(1),
     voiceTasksPerMinute: z.number().int().positive().default(4),
     videoTasksPerMinute: z.number().int().positive().default(2),
-    searchTasksPerMinute: z.number().int().positive().default(6),
-    maxAgentSteps: z.number().int().min(2).max(12).default(8),
     agentTaskTimeoutMs: z.number().int().positive().default(300_000),
     maxConcurrentTasks: z.number().int().positive().default(2),
     maxConcurrentLongTasks: z.number().int().positive().default(1),
@@ -272,18 +196,29 @@ const configSchema = z.object({
       .positive()
       .default(50 * 1024 * 1024),
     maxReplyTextChars: z.number().int().positive().default(1800),
-    contextMessagesPerUser: z.number().int().positive().default(32),
     publicContextMessagesPerRoom: z.number().int().positive().default(160),
     memoryEntriesPerUser: z.number().int().positive().default(20),
     globalMemoryEntries: z.number().int().positive().default(30),
-    userMemoryIdleMs: z
-      .number()
-      .int()
-      .positive()
-      .default(60 * 60 * 1000),
-    memoryConsolidationKeepContextMessages: z.number().int().nonnegative().default(8),
-    attachmentTtlHours: z.number().int().positive().default(24)
+    attachmentTtlHours: z.number().int().positive().default(24),
+    maxMcpOutputChars: z.number().int().positive().default(8_000)
   }),
+  reflection: z
+    .object({
+      enabled: booleanishSchema.default(true),
+      candidateThreshold: z.number().int().min(1).max(20).default(5),
+      idleMs: z.number().int().positive().default(15 * 60 * 1_000),
+      minSessionIntervalMs: z.number().int().positive().default(30 * 60 * 1_000),
+      maxTasksPerBatch: z.number().int().min(1).max(8).default(8),
+      autoWriteConfidence: z.number().min(0.95).max(1).default(0.95)
+    })
+    .default({
+      enabled: true,
+      candidateThreshold: 5,
+      idleMs: 15 * 60 * 1_000,
+      minSessionIntervalMs: 30 * 60 * 1_000,
+      maxTasksPerBatch: 8,
+      autoWriteConfidence: 0.95
+    }),
   automations: z
     .object({
       enabled: booleanishSchema.default(true),

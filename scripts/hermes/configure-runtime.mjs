@@ -12,7 +12,6 @@ const runtimeRoot = path.join(projectRoot, '.runtime', 'hermes');
 const backupRoot = path.join(runtimeRoot, 'backups');
 const serviceEnvPath = path.join(runtimeRoot, 'service.env');
 const localConfigPath = path.join(projectRoot, 'config', 'local.yaml');
-const backend = readBackend(process.argv);
 
 await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
 await mkdir(backupRoot, { recursive: true, mode: 0o700 });
@@ -29,7 +28,8 @@ if (deepseekApiKey.length < 16 || /[\r\n]/u.test(deepseekApiKey)) {
 }
 
 const existingDashScopeKey =
-  localConfig.llm?.provider === 'dashscope' ? localConfig.llm?.apiKey?.trim() : '';
+  localConfig.media?.apiKey?.trim() ||
+  (localConfig.llm?.provider === 'dashscope' ? localConfig.llm?.apiKey?.trim() : '');
 const dashScopeApiKey = (
   process.env.DANGBOT_DASHSCOPE_API_KEY?.trim() ||
   existingDashScopeKey ||
@@ -41,6 +41,10 @@ if (dashScopeApiKey.length < 16 || /[\r\n]/u.test(dashScopeApiKey)) {
 
 const apiServerKey = keepOrGenerate(existingServiceEnv.API_SERVER_KEY, 32);
 const mcpApiKey = keepOrGenerate(existingServiceEnv.DANGBOT_MCP_API_KEY, 32);
+const memoryBridgeApiKey = keepOrGenerate(
+  existingServiceEnv.DANGBOT_MEMORY_BRIDGE_API_KEY ?? localConfig.agent?.memoryBridge?.apiKey,
+  32
+);
 const sessionSecret = keepOrGenerate(localConfig.agent?.hermes?.sessionSecret, 32);
 
 await backupIfExists(serviceEnvPath, 'service.env');
@@ -51,6 +55,8 @@ const serviceEnv = [
   `DEEPSEEK_API_KEY=${deepseekApiKey}`,
   `API_SERVER_KEY=${apiServerKey}`,
   `DANGBOT_MCP_API_KEY=${mcpApiKey}`,
+  `DANGBOT_MEMORY_BRIDGE_API_KEY=${memoryBridgeApiKey}`,
+  'DANGBOT_MEMORY_BRIDGE_URL=http://127.0.0.1:18643',
   '',
   'API_SERVER_ENABLED=true',
   'API_SERVER_HOST=127.0.0.1',
@@ -62,13 +68,13 @@ await writeOwnerOnly(serviceEnvPath, serviceEnv);
 
 localConfig.agent = {
   ...(localConfig.agent ?? {}),
-  backend,
   hermes: {
     ...(localConfig.agent?.hermes ?? {}),
     baseURL: 'http://127.0.0.1:18642',
     apiKey: apiServerKey,
     sessionSecret,
     model: 'deepseek-v4-flash',
+    requestTimeoutMs: 900_000,
     maxConcurrentRuns: 2
   },
   mcp: {
@@ -77,16 +83,18 @@ localConfig.agent = {
     host: '127.0.0.1',
     port: 18643,
     apiKey: mcpApiKey
+  },
+  memoryBridge: {
+    baseURL: 'http://127.0.0.1:18643',
+    apiKey: memoryBridgeApiKey
   }
 };
-localConfig.llm = {
-  ...(localConfig.llm ?? {}),
-  provider: 'dashscope',
+localConfig.media = {
+  ...(localConfig.media ?? {}),
   baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   nativeBaseURL: 'https://dashscope.aliyuncs.com/api/v1',
   apiKey: dashScopeApiKey,
-  textModel: 'qwen3.7-flash',
-  visionModel: 'qwen3.7-flash',
+  multimodalModel: 'qwen3.7-flash',
   imageModel: 'qwen-image-3.0-pro',
   videoModels: {
     textToVideo: 'happyhorse-1.1-t2v',
@@ -95,43 +103,28 @@ localConfig.llm = {
     videoEdit: 'happyhorse-1.0-video-edit'
   },
   tts: {
-    ...(localConfig.llm?.tts ?? {}),
     enabled: true,
-    provider: 'dashscope',
-    baseURL: 'https://dashscope.aliyuncs.com/api/v1',
     apiKey: '',
     model: 'qwen-audio-3.0-tts-flash',
-    voice: 'longanhuan_v3.6',
-    speechRate: 0
+    voice: 'longanhuan_v3.6'
   }
 };
-localConfig.search = {
-  ...(localConfig.search ?? {}),
-  enabled: true,
-  provider: 'hermes'
-};
+delete localConfig.agent.backend;
+delete localConfig.llm;
+delete localConfig.search;
 await writeOwnerOnly(localConfigPath, YAML.stringify(localConfig));
 
 process.stdout.write(
   [
     'Configured the isolated DangBot Hermes runtime.',
-    `Backend: ${backend}`,
+    'Backend: dedicated Hermes only',
     'Planner model: deepseek-v4-flash',
     'DashScope models: qwen3.7-flash, qwen-audio-3.0-tts-flash, qwen-image-3.0-pro, HappyHorse',
-    'Web search: dedicated Hermes built-in web/browser tools',
+    'Web search: dedicated Hermes web_search (DDGS) and isolated browser tools',
     'Credential values: not printed',
     ''
   ].join('\n')
 );
-
-function readBackend(args) {
-  const index = args.indexOf('--backend');
-  const value = index >= 0 ? args[index + 1] : 'legacy';
-  if (value !== 'legacy' && value !== 'hermes') {
-    throw new Error('--backend must be legacy or hermes.');
-  }
-  return value;
-}
 
 function keepOrGenerate(value, minimumLength) {
   const current = typeof value === 'string' ? value.trim() : '';

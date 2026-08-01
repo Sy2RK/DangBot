@@ -109,9 +109,10 @@ export function normalizeOutgoingText(text: string): string {
 }
 
 export function redactLocalPaths(text: string): string {
-  return text
-    .replace(/(?:file:\/\/)?\/Users\/[^\s，。；;]+/g, '[本地路径已隐藏]')
-    .replace(/(?:file:\/\/)?\/tmp\/[^\s，。；;]+/g, '[本地路径已隐藏]');
+  return redactSensitiveText(text, Math.max(1_000, text.length)).replaceAll(
+    '[host path redacted]',
+    '[本地路径已隐藏]'
+  );
 }
 
 export function formatPlainList(title: string, items: string[], emptyText?: string): string {
@@ -197,3 +198,4 @@ function normalizeMarkdownSourceLine(line: string): string | undefined {
 
   return undefined;
 }
+import { redactSensitiveText } from '../utils/redaction.js';

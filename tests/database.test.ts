@@ -1,304 +1,103 @@
+import { mkdtemp } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/storage/database.js';
 import { makeTestConfig } from './helpers.js';
 
-describe('AppDatabase', () => {
-  it('lists recent completed text tasks for document generation', async () => {
+describe('Hermes v2 database', () => {
+  it('stores tasks with origin and no classifier/tool routing fields', async () => {
+    const db = AppDatabase.memory();
     const config = await makeTestConfig();
-    const db = AppDatabase.memory();
     db.seedConfig(config);
-    const source = db.createTask({
-      roomId: 'room1',
-      userId: 'user1',
-      requestType: 'rewrite',
-      prompt: '润色材料'
-    });
-    db.updateTask(source.id, {
-      status: 'completed',
-      resultKind: 'text',
-      resultText: '润色后的正文'
-    });
-    const current = db.createTask({
-      roomId: 'room1',
-      userId: 'user1',
-      requestType: 'document_generation',
-      prompt: '做成 DOCX'
-    });
-
-    expect(db.listRecentCompletedTextTasks('room1', 'user1', current.id)).toMatchObject([
-      { id: source.id, resultText: '润色后的正文' }
-    ]);
-    expect(db.listRecentCompletedRoomTextTasks('room1', current.id)).toMatchObject([
-      { id: source.id, resultText: '润色后的正文' }
-    ]);
+    const task = db.createTask({ roomId: 'room1', userId: 'u1', origin: 'interactive', prompt: '复合请求原文' });
+    expect(task).toMatchObject({ origin: 'interactive', prompt: '复合请求原文' });
+    expect(task).not.toHaveProperty('requestType');
+    expect(task).not.toHaveProperty('toolName');
+    expect(task).not.toHaveProperty('toolInputJson');
     db.close();
   });
 
-  it('seeds configured rooms and resolves roles', async () => {
-    const config = await makeTestConfig();
+  it('isolates persistent sessions by room, user, epoch and reflection purpose', () => {
     const db = AppDatabase.memory();
-    db.seedConfig(config);
-
-    expect(db.resolveRoom('room1', '测试群')).toMatchObject({
-      authorized: true,
-      enabled: false
-    });
-    expect(db.getUserRole('room1', 'admin')).toBe('group_admin');
-    expect(db.getUserRole('room1', 'sys')).toBe('system_admin');
+    db.upsertHermesSession({ sessionKeyHash: 'a'.repeat(64), roomId: 'r1', userId: 'u1', epoch: 0, purpose: 'interactive', hermesSessionId: 's1' });
+    db.upsertHermesSession({ sessionKeyHash: 'b'.repeat(64), roomId: 'r1', userId: 'u1', epoch: 0, purpose: 'reflection', hermesSessionId: 's2' });
+    expect(db.getHermesSessionByHash('a'.repeat(64))?.purpose).toBe('interactive');
+    expect(db.getHermesSessionByHash('b'.repeat(64))?.purpose).toBe('reflection');
+    expect(db.rotateHermesSession('r1', 'u1')).toBe(1);
     db.close();
   });
 
-  it('revokes admins removed from config', async () => {
+  it('invalidates crash-surviving MCP capabilities before a new process accepts work', () => {
     const db = AppDatabase.memory();
-    db.seedConfig(
-      await makeTestConfig({
-        auth: {
-          systemAdmins: ['sys'],
-          rooms: [{ id: 'room1', topic: '测试群', enabled: true, admins: ['admin'] }]
-        }
-      })
-    );
-    expect(db.getUserRole('room1', 'sys')).toBe('system_admin');
-    expect(db.getUserRole('room1', 'admin')).toBe('group_admin');
-
-    db.seedConfig(
-      await makeTestConfig({
-        auth: {
-          systemAdmins: [],
-          rooms: [{ id: 'room1', topic: '测试群', enabled: true, admins: [] }]
-        }
-      })
-    );
-
-    expect(db.getUserRole('room1', 'sys')).toBe('member');
-    expect(db.getUserRole('room1', 'admin')).toBe('member');
-    db.close();
-  });
-
-  it('does not bind configured topic-only rooms unless explicitly allowed', async () => {
-    const config = await makeTestConfig({
-      auth: {
-        systemAdmins: [],
-        allowTopicRoomBinding: false,
-        rooms: [{ topic: '重名群', enabled: true, admins: [] }]
-      }
-    });
-    const db = AppDatabase.memory();
-    db.seedConfig(config);
-
-    expect(db.resolveRoom('actual-room-id', '重名群')).toBeUndefined();
-    expect(db.resolveRoom('actual-room-id', '重名群', { allowTopicBinding: true })).toMatchObject({
-      id: 'topic:重名群',
-      authorized: true
-    });
-    expect(db.resolveRoom('actual-room-id')).toMatchObject({
-      id: 'topic:重名群',
-      authorized: true
-    });
-    db.close();
-  });
-
-  it('resolves changed runtime ids to a configured stable room', async () => {
-    const config = await makeTestConfig({
-      auth: {
-        systemAdmins: [],
-        rooms: [
-          {
-            stableId: 'stable-room',
-            id: 'runtime-old',
-            runtimeIds: ['runtime-new'],
-            topic: '测试群',
-            enabled: true,
-            admins: ['admin']
-          }
-        ]
-      }
-    });
-    const db = AppDatabase.memory();
-    db.seedConfig(config);
-
-    expect(db.resolveRoom('runtime-old', '测试群')).toMatchObject({
-      id: 'stable-room',
-      authorized: true,
-      enabled: true
-    });
-    expect(db.resolveRoom('runtime-new', '测试群')).toMatchObject({
-      id: 'stable-room',
-      authorized: true,
-      enabled: true
-    });
-    expect(db.getUserRole('stable-room', 'admin')).toBe('group_admin');
-    db.close();
-  });
-
-  it('merges old runtime room data into the configured stable room', async () => {
-    const db = AppDatabase.memory();
-    db.seedConfig(
-      await makeTestConfig({
-        auth: {
-          systemAdmins: [],
-          rooms: [{ id: 'runtime-old', topic: '测试群', enabled: true, admins: [] }]
-        }
-      })
-    );
-    db.appendContext({
-      scope: 'user',
-      roomId: 'runtime-old',
-      userId: 'u1',
-      role: 'user',
-      content: '旧上下文'
-    });
-    db.addMemory({ scope: 'user', roomId: 'runtime-old', userId: 'u1', content: '旧记忆' });
-    db.createTask({ roomId: 'runtime-old', userId: 'u1', requestType: 'qa', prompt: '旧任务' });
-
-    db.seedConfig(
-      await makeTestConfig({
-        auth: {
-          systemAdmins: [],
-          rooms: [
-            {
-              stableId: 'stable-room',
-              id: 'runtime-new',
-              runtimeIds: ['runtime-old'],
-              topic: '测试群',
-              enabled: true,
-              admins: []
-            }
-          ]
-        }
-      })
-    );
-
-    expect(db.resolveRoom('runtime-old')).toMatchObject({ id: 'stable-room', authorized: true });
-    expect(db.resolveRoom('runtime-new')).toMatchObject({ id: 'stable-room', authorized: true });
-    expect(
-      db.getContext({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 })
-    ).toEqual([{ role: 'user', content: '旧上下文' }]);
-    expect(
-      db
-        .listMemories({ scope: 'user', roomId: 'stable-room', userId: 'u1', limit: 10 })
-        .map((m) => m.content)
-    ).toEqual(['旧记忆']);
-    expect(db.listRoomTasks('stable-room', 10).map((task) => task.prompt)).toEqual(['旧任务']);
-    expect(db.listRoomTasks('runtime-old', 10)).toEqual([]);
-    db.close();
-  });
-
-  it('binds a new runtime id by topic only when the authorized topic is unique', async () => {
-    const config = await makeTestConfig({
-      auth: {
-        systemAdmins: [],
-        allowTopicRoomBinding: true,
-        rooms: [
-          {
-            stableId: 'stable-room',
-            topic: '唯一群',
-            enabled: true,
-            admins: []
-          }
-        ]
-      }
-    });
-    const db = AppDatabase.memory();
-    db.seedConfig(config);
-
-    expect(db.resolveRoom('runtime-fresh', '唯一群', { allowTopicBinding: true })).toMatchObject({
-      id: 'stable-room',
-      authorized: true,
-      enabled: true
-    });
-    expect(db.resolveRoom('runtime-fresh')).toMatchObject({
-      id: 'stable-room',
-      authorized: true
-    });
-    db.close();
-  });
-
-  it('does not topic-bind a runtime id when multiple authorized rooms share a topic', async () => {
-    const config = await makeTestConfig({
-      auth: {
-        systemAdmins: [],
-        allowTopicRoomBinding: true,
-        rooms: [
-          { stableId: 'stable-a', topic: '重名群', enabled: true, admins: [] },
-          { stableId: 'stable-b', topic: '重名群', enabled: true, admins: [] }
-        ]
-      }
-    });
-    const db = AppDatabase.memory();
-    db.seedConfig(config);
-
-    expect(db.resolveRoom('runtime-fresh', '重名群', { allowTopicBinding: true })).toBeUndefined();
-    db.close();
-  });
-
-  it('isolates user contexts inside the same room', () => {
-    const db = AppDatabase.memory();
-    db.appendContext({
-      scope: 'user',
-      roomId: 'room1',
-      userId: 'u1',
-      role: 'user',
-      content: 'one'
-    });
-    db.appendContext({
-      scope: 'user',
-      roomId: 'room1',
-      userId: 'u2',
-      role: 'user',
-      content: 'two'
-    });
-
-    expect(db.getContext({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })).toEqual([
-      { role: 'user', content: 'one' }
-    ]);
-    db.close();
-  });
-
-  it('persists user and global memories separately', () => {
-    const db = AppDatabase.memory();
-
-    db.addMemory({ scope: 'user', roomId: 'room1', userId: 'u1', content: '喜欢短回答' });
-    db.addMemory({ scope: 'user', roomId: 'room1', userId: 'u2', content: '喜欢详细回答' });
-    db.addMemory({ scope: 'global', roomId: 'room1', content: '默认使用中文' });
-
-    expect(
-      db
-        .listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })
-        .map((m) => m.content)
-    ).toEqual(['喜欢短回答']);
-    expect(
-      db.listMemories({ scope: 'global', roomId: 'room1', limit: 10 }).map((m) => m.content)
-    ).toEqual(['默认使用中文']);
-    expect(db.listMemories({ scope: 'global', roomId: 'room2', limit: 10 })).toEqual([]);
-
-    expect(db.clearMemories({ scope: 'user', roomId: 'room1', userId: 'u1' })).toBe(1);
-    expect(db.listMemories({ scope: 'user', roomId: 'room1', userId: 'u1', limit: 10 })).toEqual(
-      []
-    );
-    db.close();
-  });
-
-  it('scopes an approval to the tool that was actually approved', () => {
-    const db = AppDatabase.memory();
-    const task = db.createTask({
-      roomId: 'room1',
-      userId: 'u1',
-      requestType: 'video_generation',
-      prompt: '生成视频',
-      toolName: 'video.generate'
-    });
-    db.createApproval({
+    const task = db.createTask({ roomId: 'r1', userId: 'u1', prompt: 'work' });
+    const capability = db.createMcpContext({
       taskId: task.id,
-      roomId: 'room1',
-      requesterId: 'u1',
-      riskType: 'high_risk_tool:video.generate',
-      toolName: 'video.generate'
+      roomId: 'r1',
+      userId: 'u1',
+      role: 'member',
+      attachmentIds: [],
+      ttlMs: 60_000
     });
-    db.resolveApproval(task.id, 'admin', true);
-
-    expect(db.hasApprovedApproval(task.id, 'video.generate')).toBe(true);
-    expect(db.hasApprovedApproval(task.id, 'voice.generate')).toBe(false);
+    expect(db.resolveMcpContext(capability.token)).toBeDefined();
+    expect(db.invalidateAllMcpContexts()).toBe(1);
+    expect(db.resolveMcpContext(capability.token)).toBeUndefined();
     db.close();
+  });
+
+  it('keeps user, room, proposals and approved agent lessons scoped', () => {
+    const db = AppDatabase.memory();
+    const userMemory = db.addMemory({ scope: 'user', roomId: 'r1', userId: 'u1', source: 'manual', content: '喜欢简短回答' });
+    db.addMemory({ scope: 'user', roomId: 'r1', userId: 'u2', source: 'manual', content: '其他人的记忆' });
+    db.addMemory({ scope: 'room', roomId: 'r1', source: 'manual', content: '群项目是 DangBot' });
+    const proposal = db.addMemoryProposal({ scope: 'agent', roomId: 'r1', content: '工具失败先读结构化错误再换参数', evidence: '一次成功恢复', confidence: 0.99 });
+    db.resolveMemoryProposal(proposal.id, true, 'sys');
+    expect(db.listMemories({ scope: 'user', roomId: 'r2', userId: 'u1', limit: 10 })).toEqual([]);
+    expect(db.listMemories({ scope: 'room', roomId: 'r1', limit: 10 })).toHaveLength(1);
+    expect(db.listAgentLessons()).toHaveLength(1);
+    expect(db.deleteUserMemory(userMemory.id, 'r1', 'u2')).toBe(false);
+    expect(db.deleteUserMemory(userMemory.id, 'r1', 'u1')).toBe(true);
+    expect(db.listMemories({ scope: 'user', roomId: 'r1', userId: 'u2', limit: 10 })).toHaveLength(1);
+    db.close();
+  });
+
+  it('keeps the public room context bounded and expiring', () => {
+    const db = AppDatabase.memory();
+    db.insertMessage({ id: 'old', roomId: 'r1', userId: 'u1', text: 'old', mentioned: false, createdAt: '2020-01-01T00:00:00.000Z' });
+    db.insertMessage({ id: 'm1', roomId: 'r1', userId: 'u1', text: 'one', mentioned: false });
+    db.insertMessage({ id: 'm2', roomId: 'r1', userId: 'u1', text: 'two', mentioned: false });
+    db.insertMessage({ id: 'm3', roomId: 'r1', userId: 'u1', text: 'three', mentioned: false });
+    db.pruneRoomMessages('r1', 2);
+    expect(db.listRecentRoomMessages('r1', 10).map((entry) => entry.text)).toEqual(['two', 'three']);
+    db.close();
+  });
+
+  it('physically removes legacy task routing columns during migration', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'dangbot-migration-'));
+    const file = path.join(dir, 'old.sqlite');
+    const raw = new Database(file);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY, room_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        request_type TEXT NOT NULL, status TEXT NOT NULL, prompt TEXT NOT NULL,
+        tool_name TEXT, tool_input_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE memories (
+        id TEXT PRIMARY KEY, scope TEXT NOT NULL, room_id TEXT NOT NULL, user_id TEXT,
+        source TEXT NOT NULL DEFAULT 'manual', content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO tasks VALUES ('t1','r1','u1','qa','completed','hi','web.search','{}','2026-01-01','2026-01-01');
+      INSERT INTO memories VALUES ('m1','global','*',NULL,'automatic','leak','2026-01-01','2026-01-01');
+    `);
+    raw.close();
+    const db = await AppDatabase.open(file);
+    expect(db.getTask('t1')).toMatchObject({ origin: 'interactive', prompt: 'hi' });
+    db.close();
+    const inspect = new Database(file);
+    const columns = inspect.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).not.toEqual(expect.arrayContaining(['request_type', 'tool_name', 'tool_input_json']));
+    expect((inspect.prepare('SELECT COUNT(*) AS count FROM memories').get() as { count: number }).count).toBe(0);
+    inspect.close();
   });
 });

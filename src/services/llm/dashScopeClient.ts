@@ -50,6 +50,11 @@ interface DashScopeResponse {
   };
 }
 
+interface DashScopeMultimodalResponse {
+  choices?: Array<{ message?: { content?: string } }>;
+  error?: { message?: string };
+}
+
 interface UploadPolicyResponse extends DashScopeResponse {
   data?: {
     policy?: string;
@@ -67,11 +72,35 @@ const imageDownloadLimit = 25 * 1024 * 1024;
 const audioDownloadLimit = 25 * 1024 * 1024;
 const videoDownloadLimit = 100 * 1024 * 1024;
 
-export class DashScopeClient {
+export class DashScopeMediaClient {
   constructor(
-    private readonly config: AppConfig['llm'],
+    private readonly config: AppConfig['media'],
     private readonly outputsDir: string
   ) {}
+
+  configured(): boolean {
+    return this.config.apiKey.trim().length > 0;
+  }
+
+  speechConfigured(): boolean {
+    return this.config.tts.enabled && Boolean(this.speechApiKey());
+  }
+
+  async analyzeImage(
+    prompt: string,
+    media: DashScopeMediaInput,
+    signal?: AbortSignal
+  ): Promise<string> {
+    return this.analyzeMultimodal(prompt, media, 'image_url', signal);
+  }
+
+  async analyzeVideo(
+    prompt: string,
+    media: DashScopeMediaInput,
+    signal?: AbortSignal
+  ): Promise<string> {
+    return this.analyzeMultimodal(prompt, media, 'video_url', signal);
+  }
 
   async generateImage(
     prompt: string,
@@ -228,6 +257,64 @@ export class DashScopeClient {
 
   private speechApiKey(): string {
     return (this.config.tts.apiKey || this.config.apiKey).trim();
+  }
+
+  private async analyzeMultimodal(
+    prompt: string,
+    media: DashScopeMediaInput,
+    mediaType: 'image_url' | 'video_url',
+    signal?: AbortSignal
+  ): Promise<string> {
+    if (!this.configured()) throw new Error('DashScope 多模态服务尚未配置。');
+    const dataUrl = await fileToDataUrl(media.filePath, media.mimeType);
+    const response = await this.requestCompatibleJson<DashScopeMultimodalResponse>(
+      '/chat/completions',
+      {
+        model: this.config.multimodalModel,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: mediaType, [mediaType]: { url: dataUrl } }
+            ]
+          }
+        ],
+        temperature: 0.2
+      },
+      signal
+    );
+    const text = response.choices?.[0]?.message?.content?.trim();
+    if (!text) throw new Error('DashScope 多模态服务没有返回分析结果。');
+    return text;
+  }
+
+  private async requestCompatibleJson<T extends DashScopeMultimodalResponse>(
+    endpoint: string,
+    body: unknown,
+    signal?: AbortSignal
+  ): Promise<T> {
+    let response: Response;
+    try {
+      response = await fetch(resolveEndpoint(this.config.baseURL, endpoint), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body),
+        signal
+      });
+    } catch (error) {
+      throw new Error(`DashScope 多模态网络请求失败：${describeNetworkError(error)}`);
+    }
+    const responseText = await response.text();
+    const json = parseJson<T>(responseText);
+    if (!response.ok || json.error?.message) {
+      const detail = json.error?.message ?? responseText.trim().slice(0, 300);
+      throw new Error(`DashScope 多模态请求失败：HTTP ${response.status} ${detail}`);
+    }
+    return json;
   }
 
   private async uploadTemporaryFile(
@@ -401,7 +488,7 @@ export function selectDashScopeVideoRoute(
 }
 
 function modelForRoute(
-  models: AppConfig['llm']['videoModels'],
+  models: AppConfig['media']['videoModels'],
   route: Exclude<DashScopeVideoMode, 'auto'>
 ): string {
   switch (route) {

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { chmod, copyFile, mkdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, stat, unlink, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +35,7 @@ run(venvPython, [
   '--retries',
   '10',
   'hermes-agent==0.19.0',
+  'ddgs==9.14.4',
   'aiohttp==3.14.1',
   'mcp>=1.24,<2'
 ]);
@@ -43,12 +45,17 @@ await copyFile(
   path.join(home, 'config.yaml')
 );
 await chmod(path.join(home, 'config.yaml'), 0o600);
+await mkdir(path.join(home, 'plugins'), { recursive: true, mode: 0o700 });
+await cp(path.join(projectRoot, 'config', 'hermes', 'plugins'), path.join(home, 'plugins'), {
+  recursive: true,
+  force: true
+});
 
 const envPath = path.join(runtimeRoot, 'service.env');
 if (!(await exists(envPath))) {
   await copyFile(path.join(projectRoot, 'config', 'hermes', 'service.env.example'), envPath);
   await chmod(envPath, 0o600);
-  process.stdout.write(`Created ${envPath}; fill the three dedicated secrets before starting.\n`);
+  process.stdout.write(`Created ${envPath}; fill the four dedicated secrets before starting.\n`);
 }
 
 if (withBrowser) {
@@ -90,8 +97,16 @@ function findPython() {
         ]
       : [
           {
-            command:
-              '/Users/sheny2/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11',
+            command: path.join(
+              os.homedir(),
+              '.local',
+              'share',
+              'uv',
+              'python',
+              'cpython-3.11.15-macos-aarch64-none',
+              'bin',
+              'python3.11'
+            ),
             args: []
           },
           { command: 'python3.13', args: [] },

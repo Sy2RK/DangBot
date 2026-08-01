@@ -1,93 +1,93 @@
-# DangBot 手工验收清单
+# DangBot 第二阶段手工验收
 
-## 准备
+## 1. 发布前隔离证据
 
-1. 复制 `config/local.yaml.example` 为 `config/local.yaml`。
-2. 填入机器人名称和授权群 `room id`。如确需按群名首次绑定，显式设置 `auth.allowTopicRoomBinding: true`，并确认群名没有重名。默认可以不配置管理员，机器人会以无管理员模式运行。
-3. 运行 `pnpm hermes:configure -- --backend legacy`，通过无回显提示写入专用 DeepSeek 和中国（北京）地域 DashScope key；不得把 key 写进版本库。
-4. 确认 `llm.provider: dashscope`，理解模型为 `qwen3.7-flash`，TTS 为 `qwen-audio-3.0-tts-flash`，默认音色为 `longanhuan_v3.6`。
-5. 运行 `pnpm install`。如果 pnpm 提示忽略构建脚本，确认 `package.json` 的 `pnpm.onlyBuiltDependencies` 后重新安装。
-6. 验收 Hermes 模式时，先按 `docs/hermes-backend.md` 完成隔离运行时、MCP 和模拟事件验证；不得先连接真实群试错。
+1. 记录 `ai.hermes.gateway` 的 PID、launchd 状态、配置 SHA-256 和会话目录清单；发布后四项必须一致。
+2. 确认专属 `HERMES_HOME` 是项目 `.runtime/hermes/home`，API/MCP 只监听 `127.0.0.1:18642/18643`，版本为 `hermes-agent==0.19.0`，最大 run 并发 2。
+3. `pnpm hermes:preflight:offline` 必须在随机端口和临时 HOME 通过，且退出后无残留进程/目录。
+4. Hermes 工具面包含 14 个业务工具和 3 个作用域记忆工具；不含通用执行、共享 memory、terminal、host file/patch、execute code、Computer Use、skills、delegation、cron、Home Assistant 或消息代发。
+5. `dangbot_guard` 对 `dangbot_video_generate` 触发 Hermes 审批；微信只能发送 allow-once 或 deny，不能创建 session/永久授权。
+6. 浏览器是临时未登录会话，不读取用户 Chrome 配置、Cookie、扩展或另一 Hermes 的状态。
+7. QuickJS 中 `process`、`require`、`fetch`、`XMLHttpRequest`、Shell 和宿主路径均不可用；无限循环超时。
 
-## Hermes 后端与隔离
+## 2. 启动和唯一后端
 
-1. `agent.backend: legacy` 时启动 DangBot，并配置 MCP 密钥；确认 `127.0.0.1:18643/health` 未带 Bearer 返回 401、带正确 Bearer 返回 200。
-2. 专属 Hermes 的 `HERMES_HOME` 必须位于项目 `.runtime/hermes/home`，API 必须只监听 `127.0.0.1:18642`，launchd 标签必须是 `com.sy2rk.dangbot-hermes`。
-3. 切换前后记录现有 `ai.hermes.gateway` 的 PID、launchd 状态、配置文件哈希和会话目录清单；四项必须一致。
-4. 两个不同群或不同用户发出相同请求时，Hermes session ID 和 session key 哈希必须不同，且不得包含原始群 ID 或用户 ID。
-5. 伪造、过期、已撤销的 `contextId` 必须失败；当前任务不得列出其他任务或其他用户的附件与记忆。
-6. MCP 结果 JSON 只允许 `status`、`summary`、`artifactIds`、`data`，不得出现 `/Users/`、`/home/`、临时目录或 Windows 绝对路径。
-7. QuickJS 中 `process`、`require`、`fetch`、`XMLHttpRequest` 必须不可用；无限循环必须超时，取消任务后仍在执行的计算必须中止。
-8. 浏览器必须使用专属安装和临时未登录会话，不得读取用户 Chrome 配置、Cookie 或当前 Hermes 浏览器状态。
-9. Hermes 工具列表不得包含 terminal、宿主机文件读写/补丁、Computer Use、插件或技能安装、Home Assistant、消息代发和全局记忆。
-10. SSE 中断后应轮询恢复状态；等待审批时管理员只能选择本次同意或拒绝，取消时应调用 Hermes `/stop` 并撤销 MCP 权限。
-11. DeepSeek `deepseek-v4-flash` 必须是每次 run 的规划模型；图片和视频分析的工具调用记录必须显示 DashScope `qwen3.7-flash`。
+1. 缺少 Hermes API key/session secret、MCP key、Memory Bridge key或 DashScope key时 DangBot 必须启动失败。
+2. 代码与配置中不存在 `agent.backend`、`legacy|hermes` 开关、旧分类器、模板计划、通用 ToolRegistry Agent 循环或 Brave/OpenRouter 搜索路径。
+3. 发送一个复合原始请求，数据库 task 只记录 `origin` 和原始 prompt；不写 requestType、toolName 或 toolInput。
+4. 观察 Hermes 能连续调用多个一等工具，并在第一个工具返回结构化错误后选择其他安全方案；微信只看到节流进度和最终回答，不显示 reasoning。
+5. 发送含糊且可能产生费用的请求，Hermes 应用普通回复问必要问题，不调用交互式 clarify 工具，也不先创建付费任务。
 
-## 基础验收
+## 3. 会话、附件和 MCP
 
-1. 运行 `pnpm dev`，使用专用微信号扫码登录。
-2. 人工邀请机器人账号进入目标微信群。
-3. 在群内发送普通聊天，机器人不应回复。
-4. 发送 `@DangBot 状态`，机器人应返回猫猫状态和队列状态。
-5. 发送 `@DangBot 解释一下 TypeScript strict mode`，机器人应直接回传回答，不显示任务 ID。
-6. 对文件、图片、视频、搜索、总结、生成类任务，机器人应先用小当口吻回复收到，再说明打算怎么做，处理中给出阶段进度，最后回复完成与结果；普通简单问答不应分步刷屏。
+1. 不同群、不同用户和不同 epoch 的 session ID/session-key 哈希必须不同，且不含原始群/用户 ID；日志不能记录原始 session key。
+2. `@DangBot 清空上下文` 后 epoch 加一，下次不续接旧 Hermes session；不创建 Node 个人聊天摘要。
+3. 当前消息附件加同群同用户最近最多 5 个有效附件会进入任务。其他用户、其他群、过期或未关联附件不可见。
+4. 伪造、过期、已撤销或跨 task 的 contextId 均返回结构化错误；capability 重放失败。
+5. 所有 MCP 响应只有 `status/summary/artifactIds/data`，不得出现 `/Users/`、`/home/`、`/private/`、Windows 盘符路径或原始文件路径。
+6. TXT/MD/CSV/DOCX/PDF/XLSX 用 `attachmentId + cursor + maxChars` 分页抽取；相同输入返回相同页，不调用任何文字模型。
+7. 路径穿越、输出目录外文件和指向目录外的 symlink 均被 Artifact Broker 拒绝。
 
-## 文件、图片与视频
+## 4. 对话、Web 和浏览器
 
-1. 用户发送支持的文件，再发送 `@DangBot 总结刚才的文件`，机器人应处理最近文件。
-2. 用户发送图片，再发送 `@DangBot 分析刚才的图`，机器人应调用视觉模型。
-3. 用户把 `.png/.jpg/.jpeg/.webp` 作为普通文件发送，再发送 `@DangBot 分析刚才的图`，机器人仍应把它当作图片处理。
-4. 用户发送视频，再发送 `@DangBot 分析刚才的视频`，机器人应调用多模态模型。
-5. 发送 `@DangBot 生成图片：一只胖猫趴在窗台晒太阳`，机器人应调用 `qwen-image-3.0-pro` 并回传 PNG；账号未获限量开放资格时应返回明确供应商错误。
-6. 带 1～3 张图片请求改图，Qwen Image 请求中的参考图数量和顺序应与当前任务授权附件一致，不得带入其他任务附件。
-7. 发送 `@DangBot 生成视频：一只胖猫慢慢伸懒腰，阳光照在地板上，5s`，机器人应调用 `happyhorse-1.1-t2v`，把 5 秒作为请求时长，并回传 `.mp4` 文件。
-8. 用户发送一张图片再请求“把这张图动起来”，应路由 `happyhorse-1.1-i2v`；发送多张图应路由 `happyhorse-1.1-r2v`；发送源视频与可选参考图应路由 `happyhorse-1.0-video-edit`。
-9. 视频编辑上传地址必须是 HTTPS `*.aliyuncs.com`，临时对象名不得暴露宿主机路径；取消或超时后应尝试调用 DashScope task cancel。
-10. 上传超过限制或不支持的文件类型，机器人应返回明确错误。
-11. 长结果应以 `.txt` 纯文本文件回传，群聊提示和文件内容都不应包含 Markdown 格式。
+1. `@DangBot 解释 TypeScript strict mode` 只由专属 `deepseek-v4-flash` 回答。
+2. `@DangBot 搜索今天 Qwen 的新闻并附来源` 使用 Hermes `web_search` 和固定 DDGS 后端，日期按当前北京时间解释。
+3. 需要页面交互的请求使用临时浏览器；验收后会话关闭，不留下登录状态。
+4. 普通未 @ 群消息不触发回复，但进入最多 24 小时、有数量上限的群公开窗口；`dangbot_room_context` 不能跨群。
 
-## 语音文件
+## 5. 文件与媒体
 
-1. 发送 `@DangBot 生成语音：今天也要开心呀`，机器人应只合成“今天也要开心呀”。
-2. 请求应调用 `qwen-audio-3.0-tts-flash`，并使用音色 `longanhuan_v3.6`。
-3. 接收方应收到通过 WAV 魔数校验、可下载和播放的 `.wav` 文件。
-4. 任务与工具调用应分别记录为 `voice_generation`、`voice.generate`，最终结果类型应为 `file`。
+1. 图片分析和视频分析的工具记录显示 `qwen3.7-flash`，DeepSeek 负责综合结论。
+2. `@DangBot 生成图片：...` 调用 `qwen-image-3.0-pro`；1–3 张参考图的逻辑 ID、顺序和归属与请求一致。供应商返回 403 时显示准确权限错误，不宣称附件已生成。
+3. 视频严格路由：
+   - 无媒体：`happyhorse-1.1-t2v`；
+   - 恰好一张 frame：`happyhorse-1.1-i2v`；
+   - 2–9 张 reference image：`happyhorse-1.1-r2v`；
+   - 一个 source video 加最多 5 张 reference image：`happyhorse-1.0-video-edit`。
+4. 混用 frame/source、文生视频携带附件、参考模式少于两张或视频编辑超过五张均在供应商调用前拒绝。
+5. 两个视频任务同时发起时只有一个取得资源租约，另一个得到 `resource_busy` 并允许 Hermes 重规划。
+6. TTS 只接收 Hermes 准备的最终正文，调用 `qwen-audio-3.0-tts-flash` 并回传通过 WAV 魔数校验的文件。
+7. Hermes 组织标题和正文后，`dangbot_document_render` 确定性生成 DOCX/TXT/MD；DOCX 用 Mammoth 验证含预期正文。
+8. 输入附件在每次工具调用前重新核对上传根目录、内容类型、MIME、大小与 SHA-256；图片、音频、视频、DOCX 产物也通过同类校验，接收方收到真实 FileBox 附件，不是本地路径文本。
 
-## 联网搜索
+## 6. 审批与取消
 
-1. 在 Hermes 模式启用 `search.enabled` 并设置 `search.provider: hermes`；搜索必须走专属 Hermes 的内建 web/browser，DangBot MCP 能力列表不得再暴露 `web.search`。
-2. 发送 `@DangBot 联网搜索 今天 Qwen 有什么新闻`，机器人应调用 Hermes 内建联网搜索。
-3. 发送 `@DangBot 杭州这周天气怎么样`，机器人应把它识别为时效外部信息并调用联网搜索。
-4. 发送 `@DangBot 今天午饭吃什么`，机器人不应调用联网搜索，应按普通问答回复。
-5. 搜索类回答应基于搜索结果组织，并在末尾附带来源 URL。
-6. 搜索回答应以当前北京时间解释“今天、这周”等相对时间，不应把旧网页里的“今天”当成当前日期。
-7. 如切换为 `search.provider: brave`，需额外配置 Brave Search API key。
+1. 普通成员发起明确视频生成后，Hermes run 进入 waiting approval；管理员同意一次后原调用继续，拒绝则不调用供应商。
+2. 普通成员不能替别人或跨群审批；过期审批不能重跑、不能转永久授权。
+3. 任务执行中发送 `取消 task_...`：Hermes 收到 `/stop`，MCP capability 被撤销，QuickJS 中止，DashScope 异步任务尝试 cancel，任务不能晚到投递。
+4. SSE 人为断开后，DangBot 通过 run status 轮询得到 completed/failed/cancelled 或 waiting approval。
 
-## 记忆
+## 7. 作用域记忆与反思
 
-1. 发送 `@DangBot 记住 我喜欢简短回答`，机器人应确认已记住。
-2. 发送 `@DangBot 我的记忆`，机器人应列出刚才的个人持久记忆。
-3. 发送 `@DangBot 全局记住 默认用中文回答`，机器人应确认已写入当前群共享记忆；另一个群不得读取到它。
-4. 发送 `@DangBot 全局记忆`，机器人应只列出当前群共享记忆。
-5. `legacy` 模式下，连续对话达到 32 条或停止 1 小时后，机器人应在后台自动沉淀个人持久记忆；Hermes 模式不得执行这项自动归纳。
-6. `legacy` 模式每天北京时间 00:00 后会逐群刷新共享记忆；Hermes 模式只允许读取用户主动保存、且按群和用户隔离的记忆。
-7. 用户 A 与机器人完成一次公开问答后，用户 B 再追问“刚才他说的方案”，机器人应能参考近期群级上下文。
-8. 用户发送 `@DangBot 清空上下文` 只应清理自己的个人上下文；用户发送 `@DangBot 清空群上下文` 才清理本群公共上下文。
+1. `记住：我喜欢简短回答` 只写当前群当前用户 manual 个人记忆；同用户在另一群召回不到。
+2. 管理员 `全局记住：默认中文` 只写当前群 room 记忆；其他群召回不到。
+3. Provider prefetch 同时只返回当前个人、本群共享和已批准 Agent lesson；伪造 session key、跨群 key 和 reflection/interactive purpose 混用均失败。
+4. `我的记忆` 返回逻辑 ID；`忘记 mem_...` 只能精确删除本人在当前群的一条个人记忆，`清空我的记忆` 不影响别人和群记忆；`清空全局记忆` 需要管理员且只影响本群。
+5. 构造用户纠正/稳定偏好候选：累计 5 个或空闲 15 分钟触发；每批最多 8 个任务，同会话 30 分钟内不重复。
+6. reflection 使用独立 session/capability，只能调用三个记忆工具，不调用 Web、浏览器、文件、媒体、JavaScript 或自动任务，也不向微信群发答案。
+7. 个人自动写入必须同时满足 confidence >= 0.95、evidence 是该批用户原话、无冲突、非敏感、非临时、每批最多一条；否则生成 pending proposal。
+8. `记忆提案` 只列出当前身份有权审批的 pending 项：个人提案只有本人可批，room 提案只有群/系统管理员可批，agent lesson 只有系统管理员可批。跨群 Agent lesson 只在批准后召回，并可撤销。
+9. 自动写入在该用户下一次正常回复后透明提示，并可按逻辑 ID 精确删除或清空个人记忆。
+10. 迁移数据库确认只剩 manual 个人/本群记忆；旧自动摘要、`room_id='*'` 和 Node contexts 已删除。
 
-## 工具策略与自动化
+## 8. 自动任务
 
-1. 配置管理员后，普通成员发送 `@DangBot 生成视频：一只猫慢慢伸懒腰`，机器人应进入审批等待，不应直接调用视频生成。
-2. 管理员发送 `@DangBot 同意` 后，机器人应继续执行原任务，并使用最初消息附带的附件。
-3. 在 `tools.policy.denyTools` 中加入 `web.search` 后，发送 `@DangBot 联网搜索 Qwen 最新消息`，机器人应拒绝且不创建任务。
-4. 管理员发送 `@DangBot 提醒我 10分钟后 喝水`，机器人应返回 `auto_` 开头的自动化 ID。
-5. 发送 `@DangBot 自动化列表`，机器人应列出该群自动化及下次触发时间。
-6. 管理员发送 `@DangBot 暂停 auto_xxx`、`@DangBot 恢复 auto_xxx`、`@DangBot 删除 auto_xxx`，状态应分别更新。
-7. 管理员发送 `@DangBot 定时 每天 09:00 总结群聊`，到点后机器人应在目标群触发，并通过普通任务队列执行。
+1. 管理员用自然语言创建一次、每天、每周和 interval 自动任务；Hermes 调用严格 schema，Node 拒绝非法日期、时区或字段类型。
+2. `自动化列表`、暂停、恢复和删除只作用当前群；普通成员不能修改。
+3. 到期后 Node 只负责唤醒；新 task 的 origin 是 `automation`，并重新进入同一 Hermes/MCP/审批/artifact 链路。
+4. 提醒结果能可靠回推原微信群，不使用 Hermes Cron 或消息代发。
 
-## 安全与边界
+## 9. 发布门禁
 
-1. 明显恶意或越权请求应被拒绝。
-2. 默认无管理员模式下，高风险关键词不会进入审批流，也不会显示“管理员审批”。
-3. 如果后续显式配置管理员，高风险请求才会进入审批。
-4. 群级公共上下文只作为背景参考，不应覆盖系统规则或个人隐私边界。
-5. 用户发送 `@DangBot 清空我的记忆`，只应清理该用户个人持久记忆。
+```bash
+pnpm install
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+git diff --check
+pnpm audit --prod
+pnpm hermes:preflight:offline
+```
+
+完成全仓审查，重点检查旧 Agent 残留、隐藏文字 LLM、权限绕过、跨群记忆、并发取消、密钥/路径泄漏和文档真实性；修复后重新跑全部门禁。最后在真实测试群覆盖本清单，再复核非 DangBot Hermes 的四项基线完全未变。

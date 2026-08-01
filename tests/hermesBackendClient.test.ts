@@ -63,6 +63,10 @@ describe('HermesBackendClient', () => {
     });
     expect(identity.sessionId).not.toContain('room-a');
     expect(identity.sessionKey).not.toContain('user-a');
+    expect(identity.sessionId).toMatch(/^dangbot_i_[a-f0-9]{40}$/);
+    expect(client.sessionIdentity('room-a', 'user-a', 0, 'reflection').sessionId).toMatch(
+      /^dangbot_r_[a-f0-9]{40}$/
+    );
     expect(client.sessionIdentity('room-a', 'user-b').sessionId).not.toBe(identity.sessionId);
     expect(client.sessionIdentity('room-b', 'user-a').sessionId).not.toBe(identity.sessionId);
   });
@@ -148,6 +152,47 @@ describe('HermesBackendClient', () => {
       },
       { url: '/v1/runs/run_approval/stop', body: '{}' }
     ]);
+  });
+
+  it('stops the remote run when the request timeout fires', async () => {
+    let stopped = false;
+    const baseURL = await listen(async (request, response) => {
+      if (request.url === '/v1/runs' && request.method === 'POST') {
+        return json(response, 202, { run_id: 'run_timeout' });
+      }
+      if (request.url === '/v1/runs/run_timeout/events') return json(response, 503, {});
+      if (request.url === '/v1/runs/run_timeout' && request.method === 'GET') {
+        return json(response, 200, { run_id: 'run_timeout', status: 'running' });
+      }
+      if (request.url === '/v1/runs/run_timeout/stop' && request.method === 'POST') {
+        stopped = true;
+        return json(response, 200, {});
+      }
+      return json(response, 404, {});
+    });
+    const client = new HermesBackendClient({
+      baseURL,
+      apiKey: 'api-test-key-long-enough',
+      sessionSecret: 'stable-test-session-secret-at-least-32-characters',
+      model: 'deepseek-v4-flash',
+      requestTimeoutMs: 40,
+      pollIntervalMs: 10,
+      maxConcurrentRuns: 2
+    });
+    const identity = client.sessionIdentity('room', 'user');
+    await expect(
+      client.run(
+        {
+          input: '测试',
+          instructions: '指令',
+          sessionId: identity.sessionId,
+          sessionKey: identity.sessionKey
+        },
+        new AbortController().signal
+      )
+    ).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stopped).toBe(true);
   });
 
   function makeClient(baseURL: string): HermesBackendClient {

@@ -1,10 +1,9 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import ExcelJS from 'exceljs';
 import mammoth from 'mammoth';
-import { lookup } from 'mime-types';
 import type { AppConfig, AttachmentKind, AttachmentRecord, IncomingAttachment } from '../../types.js';
 import { ensureDir, safeFileName, sha256File } from '../../utils/fs.js';
 import { addHoursIso, nowIso } from '../../utils/time.js';
@@ -43,6 +42,27 @@ export class FileService {
     if (attachment.sizeBytes > limit) {
       throw new Error(`文件过大，当前限制为 ${formatBytes(limit)}。`);
     }
+    const info = await stat(attachment.path);
+    if (!info.isFile() || info.size !== attachment.sizeBytes) {
+      throw new Error('附件大小或文件类型与下载结果不一致。');
+    }
+    await assertAttachmentContent(attachment.path, attachment.name, attachment.mimeType);
+  }
+
+  async verifyAttachment(record: AttachmentRecord): Promise<AttachmentRecord> {
+    const [root, resolved] = await Promise.all([
+      realpath(this.config.storage.uploadsDir),
+      realpath(record.filePath)
+    ]);
+    const relative = path.relative(root, resolved);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error('附件路径越过了 DangBot 上传目录。');
+    }
+    const info = await stat(resolved);
+    if (!info.isFile() || info.size !== record.sizeBytes) throw new Error('附件大小已变化。');
+    if (await sha256File(resolved) !== record.hash) throw new Error('附件哈希校验失败。');
+    await assertAttachmentContent(resolved, record.fileName, record.mimeType);
+    return { ...record, filePath: resolved };
   }
 
   async toAttachmentRecord(input: {
@@ -112,68 +132,18 @@ export class FileService {
     throw new Error('该文件类型暂不支持文本提取。');
   }
 
-  async writeTextResult(title: string, content: string): Promise<string> {
-    await ensureDir(this.config.storage.outputsDir);
-    const fileName = `${safeFileName(title)}_${Date.now()}.txt`;
-    const filePath = path.join(this.config.storage.outputsDir, fileName);
-    await writeFile(filePath, content, 'utf8');
-    return filePath;
-  }
-
-  async writeEditedResult(
-    source: AttachmentRecord,
+  async writeDocumentResult(
+    title: string,
     content: string,
-    operation: 'rewrite' | 'translate'
-  ): Promise<string | undefined> {
-    const ext = path.extname(source.fileName).toLowerCase();
-    if (!['.txt', '.md', '.docx'].includes(ext)) return undefined;
-
-    await ensureDir(this.config.storage.outputsDir);
-    const baseName = safeFileName(path.basename(source.fileName, ext));
-    const label = operation === 'translate' ? '翻译版' : '润色版';
-    const filePath = path.join(
-      this.config.storage.outputsDir,
-      `${baseName}_${label}_${Date.now()}${ext}`
-    );
-
-    if (ext === '.docx') {
-      await writeFile(filePath, await buildDocxBuffer(content));
-      return filePath;
-    }
-
-    await writeFile(filePath, content, 'utf8');
-    return filePath;
-  }
-
-  async writeDocxResult(title: string, content: string): Promise<string> {
+    format: 'docx' | 'txt' | 'md'
+  ): Promise<string> {
     await ensureDir(this.config.storage.outputsDir);
     const filePath = path.join(
       this.config.storage.outputsDir,
-      `${safeFileName(title)}_${Date.now()}.docx`
+      `${safeFileName(title)}_${Date.now()}.${format}`
     );
-    await writeFile(filePath, await buildDocxBuffer(content));
+    await writeFile(filePath, format === 'docx' ? await buildDocxBuffer(content) : content);
     return filePath;
-  }
-
-  async writeTextAsXlsx(title: string, rows: Array<Record<string, string | number>>): Promise<string> {
-    await ensureDir(this.config.storage.outputsDir);
-    const fileName = `${safeFileName(title)}_${Date.now()}.xlsx`;
-    const filePath = path.join(this.config.storage.outputsDir, fileName);
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Result');
-    const headers = rows[0] ? Object.keys(rows[0]) : [];
-    if (headers.length > 0) {
-      worksheet.addRow(headers);
-      for (const row of rows) {
-        worksheet.addRow(headers.map((header) => row[header] ?? ''));
-      }
-    }
-    await workbook.xlsx.writeFile(filePath);
-    return filePath;
-  }
-
-  guessMimeType(fileName: string): string {
-    return lookup(fileName) || 'application/octet-stream';
   }
 }
 
@@ -207,8 +177,7 @@ async function readUtf8WithLimit(filePath: string): Promise<string> {
 }
 
 function normalizeExtractedText(text: string): string {
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  return normalized.length > 80_000 ? `${normalized.slice(0, 80_000)}\n\n[内容过长，已截断。]` : normalized;
+  return text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function cellValueToText(value: ExcelJS.CellValue): string {
@@ -232,4 +201,64 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
   return `${Math.round(bytes / 1024 / 1024)}MB`;
+}
+
+async function assertAttachmentContent(filePath: string, fileName: string, mimeType: string): Promise<void> {
+  const extension = path.extname(fileName).toLowerCase();
+  const file = await readFile(filePath);
+  const header = file.subarray(0, Math.min(file.length, 8_192));
+  const matches =
+    supportedTextExts.has(extension)
+      ? !header.includes(0)
+      : extension === '.pdf'
+        ? header.subarray(0, 5).toString('ascii') === '%PDF-'
+        : extension === '.docx' || extension === '.xlsx'
+          ? isZip(header)
+          : extension === '.png'
+            ? header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+            : extension === '.jpg' || extension === '.jpeg'
+              ? header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff
+              : extension === '.webp'
+                ? header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WEBP'
+                : extension === '.webm'
+                  ? header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
+                  : extension === '.mp4' || extension === '.m4v' || extension === '.mov'
+                    ? header.subarray(4, 8).toString('ascii') === 'ftyp'
+                    : extension === '.mpeg' || extension === '.mpg'
+                      ? header[0] === 0x00 && header[1] === 0x00 && header[2] === 0x01
+                      : false;
+  if (!matches || !mimeMatchesExtension(extension, mimeType)) {
+    throw new Error('附件内容类型、扩展名或 MIME 不一致。');
+  }
+}
+
+function isZip(header: Buffer): boolean {
+  return (
+    header[0] === 0x50 &&
+    header[1] === 0x4b &&
+    [0x03, 0x05, 0x07].includes(header[2] ?? -1) &&
+    [0x04, 0x06, 0x08].includes(header[3] ?? -1)
+  );
+}
+
+function mimeMatchesExtension(extension: string, mimeType: string): boolean {
+  const allowed: Record<string, string[]> = {
+    '.txt': ['text/plain'],
+    '.md': ['text/markdown', 'text/plain'],
+    '.csv': ['text/csv', 'text/plain'],
+    '.png': ['image/png'],
+    '.jpg': ['image/jpeg'],
+    '.jpeg': ['image/jpeg'],
+    '.webp': ['image/webp'],
+    '.mp4': ['video/mp4'],
+    '.m4v': ['video/mp4', 'video/x-m4v'],
+    '.mov': ['video/quicktime', 'video/mov'],
+    '.webm': ['video/webm'],
+    '.mpeg': ['video/mpeg'],
+    '.mpg': ['video/mpeg'],
+    '.pdf': ['application/pdf'],
+    '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']
+  };
+  return allowed[extension]?.includes(mimeType.toLowerCase()) ?? false;
 }

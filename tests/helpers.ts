@@ -33,7 +33,6 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       file: path.join(dir, 'dangbot.log')
     },
     agent: {
-      backend: 'legacy',
       hermes: {
         baseURL: 'http://127.0.0.1:18642',
         apiKey: '',
@@ -50,6 +49,10 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
         apiKey: 'test-mcp-key-32-characters-minimum',
         contextTtlMs: 60_000
       },
+      memoryBridge: {
+        baseURL: 'http://127.0.0.1:18643',
+        apiKey: 'test-memory-key-32-characters-minimum'
+      },
       sandbox: {
         enabled: true,
         maxExecutionMs: 500,
@@ -57,15 +60,12 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
         maxOutputChars: 2_000
       }
     },
-    llm: {
-      provider: 'openai-compatible',
+    media: {
       baseURL: 'https://example.test/v1',
       nativeBaseURL: 'https://dashscope.aliyuncs.com/api/v1',
       apiKey: '',
-      textModel: 'test-text',
-      visionModel: 'test-vision',
-      imageModel: 'test-image',
-      videoModel: 'test-video',
+      multimodalModel: 'qwen3.7-flash',
+      imageModel: 'qwen-image-3.0-pro',
       videoModels: {
         textToVideo: 'happyhorse-1.1-t2v',
         imageToVideo: 'happyhorse-1.1-i2v',
@@ -74,45 +74,18 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       },
       tts: {
         enabled: false,
-        provider: 'doubao',
-        baseURL: 'https://openspeech.bytedance.com/api/v3',
         apiKey: '',
         model: 'qwen-audio-3.0-tts-flash',
-        resourceId: 'seed-tts-2.0',
-        voice: 'zh_male_tiancaitongsheng_uranus_bigtts',
-        speechRate: 0
-      }
-    },
-    search: {
-      enabled: false,
-      provider: 'openrouter',
-      braveApiKey: '',
-      searchContextSize: 'medium',
-      count: 5,
-      searchLang: 'zh-hans',
-      uiLang: 'zh-CN',
-      safeSearch: 'moderate',
-      extraSnippets: true
-    },
-    tools: {
-      policy: {
-        defaultHighRiskRequiresApproval: true,
-        allowNetworkTools: true,
-        allowFileWriteTools: false,
-        maxToolOutputChars: 8000,
-        denyTools: [],
-        roomToolOverrides: []
+        voice: 'longanhuan_v3.6'
       }
     },
     limits: {
       userRequestsPerMinute: 6,
       roomRequestsPerMinute: 30,
-      fileTasksPerMinute: 3,
       imageTasksPerMinute: 6,
+      imageGenerationTasksPerMinute: 1,
       voiceTasksPerMinute: 4,
       videoTasksPerMinute: 2,
-      searchTasksPerMinute: 6,
-      maxAgentSteps: 8,
       agentTaskTimeoutMs: 5000,
       maxConcurrentTasks: 2,
       maxConcurrentLongTasks: 1,
@@ -123,13 +96,19 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       maxImageBytes: 10 * 1024 * 1024,
       maxVideoBytes: 50 * 1024 * 1024,
       maxReplyTextChars: 1800,
-      contextMessagesPerUser: 32,
       publicContextMessagesPerRoom: 160,
       memoryEntriesPerUser: 20,
       globalMemoryEntries: 30,
-      userMemoryIdleMs: 60 * 60 * 1000,
-      memoryConsolidationKeepContextMessages: 8,
-      attachmentTtlHours: 24
+      attachmentTtlHours: 24,
+      maxMcpOutputChars: 8_000
+    },
+    reflection: {
+      enabled: true,
+      candidateThreshold: 5,
+      idleMs: 15 * 60 * 1000,
+      minSessionIntervalMs: 30 * 60 * 1000,
+      maxTasksPerBatch: 8,
+      autoWriteConfidence: 0.95
     },
     automations: {
       enabled: true,
@@ -165,21 +144,17 @@ export async function makeTestConfig(overrides: DeepPartial<AppConfig> = {}): Pr
       ...overrides.agent,
       hermes: { ...base.agent.hermes, ...overrides.agent?.hermes },
       mcp: { ...base.agent.mcp, ...overrides.agent?.mcp },
+      memoryBridge: { ...base.agent.memoryBridge, ...overrides.agent?.memoryBridge },
       sandbox: { ...base.agent.sandbox, ...overrides.agent?.sandbox }
     },
-    llm: {
-      ...base.llm,
-      ...overrides.llm,
-      videoModels: { ...base.llm.videoModels, ...overrides.llm?.videoModels },
-      tts: { ...base.llm.tts, ...overrides.llm?.tts }
+    media: {
+      ...base.media,
+      ...overrides.media,
+      videoModels: { ...base.media.videoModels, ...overrides.media?.videoModels },
+      tts: { ...base.media.tts, ...overrides.media?.tts }
     },
-    search: { ...base.search, ...overrides.search },
-    tools: {
-      ...base.tools,
-      ...overrides.tools,
-      policy: { ...base.tools.policy, ...overrides.tools?.policy }
-    } as AppConfig['tools'],
     limits: { ...base.limits, ...overrides.limits },
+    reflection: { ...base.reflection, ...overrides.reflection },
     automations: { ...base.automations, ...overrides.automations },
     auth: { ...base.auth, ...overrides.auth } as AppConfig['auth']
   };

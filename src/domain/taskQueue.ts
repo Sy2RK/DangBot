@@ -1,6 +1,7 @@
 import type { Logger } from 'pino';
 import type { AppDatabase } from '../storage/database.js';
 import type { TaskRecord } from '../types.js';
+import { safeErrorSummary } from '../utils/redaction.js';
 
 interface QueueItem {
   task: TaskRecord;
@@ -99,13 +100,13 @@ export class TaskQueue {
       }
       item.resolve();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = safeErrorSummary(error, 1_000);
       const current = this.db.getTask(item.task.id);
       if (current?.status === 'cancelled') {
         item.resolve();
         return;
       }
-      this.logger.error({ error, taskId: item.task.id }, 'task failed');
+      this.logger.error({ error: message, taskId: item.task.id }, 'task failed');
       this.db.updateTask(item.task.id, { status: 'failed', error: message });
       item.reject(error);
     } finally {

@@ -2,87 +2,128 @@
 
 ## 不变量
 
-- 现有 `ai.hermes.gateway` 不属于 DangBot：不得停止、重启、更新、替换、切换 profile，也不得复制 `~/.hermes` 的配置、凭据、会话或浏览器状态。
-- 专属实例固定使用项目 `.runtime/hermes/`、`127.0.0.1:18642`、`127.0.0.1:18643` 和 `com.sy2rk.dangbot-hermes`。
-- 微信群始终由 Wechaty/wechat4u 接入。Hermes 自带微信适配器不启用。
-- 正式切换前保持 `agent.backend=legacy`；失败时绝不自动回退到不受控工具。
+- `ai.hermes.gateway` 不属于 DangBot。不得停止、重启、更新、替换或切换它的 profile；不得读取、复制或散列以外处理 `~/.hermes` 中的凭据和会话内容。
+- DangBot 专属实例固定使用项目 `.runtime/hermes/`、API `127.0.0.1:18642`、MCP/Memory Bridge `127.0.0.1:18643` 和 launchd 标签 `com.sy2rk.dangbot-hermes`。
+- 微信群只经 Wechaty/wechat4u 接入，不启用 Hermes 微信适配器。
+- Hermes 是唯一 Agent。Hermes、MCP、Memory Bridge 或 DashScope 关键配置未就绪时 DangBot 启动失败，不存在旧后端回退。
+- 回滚只能恢复上一稳定 Git SHA 与数据库/配置快照，然后只重启 DangBot。
 
-## 架构
+## 运行组件
 
 ```mermaid
 flowchart LR
-    W["微信群"] --> A["Wechaty / wechat4u"]
-    A --> E["DangBot 边缘层"]
-    E --> H["专属 Hermes API :18642"]
-    H --> D["DeepSeek v4 主 Agent"]
-    D --> B["隔离网页与浏览器"]
-    D --> M["DangBot MCP :18643"]
-    M --> Q["DashScope 多模态与媒体模型"]
-    M --> F["文件 / 产物 / 显式记忆 / QuickJS"]
-    F --> E
-    E --> A
+    W["微信群"] --> E["DangBot 边缘层"]
+    E --> H["独立 Hermes API :18642"]
+    H --> D["deepseek-v4-flash"]
+    H --> B["原生 Web / 临时浏览器"]
+    H --> M["一等 MCP :18643"]
+    M --> Q["DashScope 媒体"]
+    M --> F["文件 / QuickJS / 自动任务"]
+    H <--> P["dangbot_scoped Provider"]
+    M --> A["Artifact Broker"]
+    A --> E
 ```
 
-DangBot 保存 `hermes_runs`、`mcp_contexts` 和 `artifacts` 映射。Hermes 看不到宿主绝对路径；Wechaty 只发送 artifact broker 重新校验过的文件。
+`hermes-agent==0.19.0` 和无密钥搜索后端 `ddgs==9.14.4` 固定在专属 venv。配置同时关闭宿主 terminal/file/code execution、共享 memory、skills、delegation、cron、Computer Use、Home Assistant 和原生媒体生成；只保留 Hermes 的 `web_search`、临时 browser、专属 MCP 与 `dangbot_scoped` MemoryProvider。
 
-Hermes 0.19.0 原生支持 DashScope 对话 provider，但没有 DashScope 图片、HappyHorse 视频或 Qwen Audio TTS 插件。专属 Hermes 因此原生负责 DeepSeek 规划和 web/browser；`qwen3.7-flash` 多模态、`qwen-image-3.0-pro`、`qwen-audio-3.0-tts-flash` 与 HappyHorse 统一经 DangBot MCP 调用，以保留 contextId、附件白名单、取消和 artifact broker 边界。
+Hermes 0.19.0 要暴露外部 Provider 工具就必须连同共享 `memory` toolset 一起启用。为避免暴露全局 `MEMORY.md` 写入口，Provider 只承担 prefetch/sync turn；严格的 `dangbot_memory_recall/propose/feedback` 作为同一 loopback MCP 的一等工具注册。作用域与落库规则仍由 Memory Bridge 和 session-key 哈希映射强制执行。
 
-## 初始化
+## 首次初始化
 
-1. 确认独立 Python 3.11 可用，然后运行：
+1. 只读记录非 DangBot Hermes 基线：
+
+   ```bash
+   launchctl print "gui/$(id -u)/ai.hermes.gateway"
+   ps -axo pid=,command= | grep '[h]ermes_cli.main'
+   shasum -a 256 "$HOME/.hermes/config.yaml"
+   find "$HOME/.hermes/sessions" -mindepth 1 -maxdepth 1 -type d | wc -l
+   ```
+
+   只记录 PID、状态、配置哈希和会话目录数量/名称，不打开凭据内容。
+
+2. 创建独立运行时：
 
    ```bash
    pnpm hermes:bootstrap:browser
    ```
 
-   脚本只创建 `.runtime/hermes/venv` 和 `.runtime/hermes/home`，并安装固定 `hermes-agent==0.19.0`。不调用 `hermes profile use/clone/update`。浏览器默认只复用已安装浏览器的可执行程序，但强制使用 agent-browser 的临时未登录 profile；不会读取该浏览器的用户目录或 Cookie。需要连浏览器二进制也独立时，运行 `pnpm hermes:bootstrap:browser-download`。启动器只用 `--force` 绕过 Hermes 对“机器上已有任意 launchd 网关”的宽泛前台保护；绝不使用会停止其他进程的 `--replace`。
+   脚本创建 `.runtime/hermes/venv` 和 `.runtime/hermes/home`，安装固定版本并复制跟踪配置及两个插件：`dangbot_scoped` 与 `dangbot_guard`。它不执行任何 `hermes profile use/clone/update`。浏览器只复用可执行文件，profile、Cookie 和会话始终临时未登录；需要独立浏览器二进制时运行 `pnpm hermes:bootstrap:browser-download`。
 
-2. 运行 `pnpm hermes:configure -- --backend legacy`，以无回显方式输入 DangBot 专用的 DeepSeek key 和中国（北京）地域 DashScope key。脚本会写入 DashScope 模型路由，为专属 API、MCP 和会话分别生成随机密钥，把运行凭据写入权限为 `0600` 的忽略文件，并在 `.runtime/hermes/backups/` 留下本地配置备份。不要复用或复制 `~/.hermes/.env`。无人值守部署可用临时环境变量 `DANGBOT_DEEPSEEK_API_KEY` 和 `DANGBOT_DASHSCOPE_API_KEY` 输入；不要把这些变量写入 shell profile。
-
-3. 给 DangBot 进程设置：
-   - `DANGBOT_MCP_API_KEY`：与专属 Hermes 的同名值一致。
-   - `DANGBOT_HERMES_API_KEY`：与专属 Hermes 的 `API_SERVER_KEY` 一致。
-   - `DANGBOT_HERMES_SESSION_SECRET`：另一个独立随机值，只用于不可逆生成“群 + 用户”的会话身份。
-   - `DANGBOT_AGENT_BACKEND=legacy`：预验收阶段必须保持 legacy。
-
-## 离线预验收
-
-1. 记录现有 Hermes 基线，输出保存到发布工单，不要修改服务：
+3. 配置专用凭据：
 
    ```bash
-   launchctl print "gui/$(id -u)/ai.hermes.gateway"
-   shasum -a 256 "$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
-   ps -axo pid=,command= | grep '[h]ermes_cli.main'
+   pnpm hermes:configure
    ```
 
-   同时只读记录现有 Hermes 配置哈希和会话目录名称/数量；不得打开或复制密钥内容。
+   脚本用无回显输入接收 DangBot 专用 DeepSeek 与中国（北京）DashScope key，为 Hermes API、MCP、Memory Bridge 和 session HMAC 分别生成随机密钥，将本地文件写为 `0600`，并在 `.runtime/hermes/backups/` 留备份。无人值守可临时设置 `DANGBOT_DEEPSEEK_API_KEY` 与 `DANGBOT_DASHSCOPE_API_KEY`；不得写入 shell profile 或版本库。
 
-2. 在 legacy 模式重启 DangBot，使专属 MCP 先监听 18643。检查错误密钥返回 401，正确密钥才返回健康状态。
+4. 运行离线预检：
 
-3. 前台运行 `pnpm hermes:run`，或在 macOS 运行 `pnpm hermes:install:launchd` 安装专属服务。其他平台用系统服务管理器直接运行 `scripts/hermes/run-dedicated.mjs`。
+   ```bash
+   pnpm hermes:preflight:offline
+   ```
 
-4. 运行 `pnpm hermes:preflight:offline`。它会启动真实 DangBot MCP、专属 Hermes API 和本地模拟 DeepSeek 接口，验证 `/v1/runs`、SSE、模型固定值及最终工具白名单；不会连接模型供应商或微信。随后再使用模拟 Wechaty 事件验证文本、搜索、多模态、文档、生成、TTS、提醒、取消、审批和 QuickJS。不得在此阶段连接真实群。
+   预检复用专属 venv，但创建一次性临时 `HERMES_HOME`、随机 loopback 端口和模拟 DeepSeek，不读取正式专属会话，也不连接微信或供应商。它会：
 
-5. 专属 API 与 MCP 都健康后，运行 `pnpm hermes:preflight:live`。它只通过专属 API 发起一次不调用工具的 `deepseek-v4-flash` 连通性请求，不连接微信，也不会向任何群发送消息。随后运行 `pnpm dashscope:preflight`，确认 `qwen3.7-flash` 文本、多模态和 Qwen Audio TTS；图片与视频生成会产生费用，默认不调用，需要供应商级真实媒体验收时显式追加 `-- --image`、`-- --video` 或 `-- --paid-media`。只有这些检查通过，才允许进入真实测试群验收。
+   - 用 Python Hermes 同版本 MCP 客户端验证 17 个严格工具；
+   - 启动真实 Hermes 0.19.0 API，验证 `/v1/runs`、SSE 和 `deepseek-v4-flash`；
+   - 确认全部一等 MCP/记忆工具存在，通用执行入口和宿主工具不存在；
+   - 在退出时销毁临时 HOME。
 
-6. 检查专属 API 健康状态、MCP 工具列表、模型名和并发上限；确认宿主 terminal/file/code/memory/delegation 等工具未暴露。
+5. 启动专属 Hermes：
 
-## 单次切换
+   ```bash
+   pnpm hermes:run
+   # macOS 可选：
+   pnpm hermes:install:launchd
+   ```
 
-1. 再次记录现有 Hermes 基线，备份 `data/` 与 `config/local.yaml` 到受控位置。
-2. 确认专属 Hermes 与 MCP 均健康，且单元测试和模拟事件全部通过。
-3. 只把 DangBot 的 `DANGBOT_AGENT_BACKEND` 改为 `hermes`，只停止并重启 DangBot。不要操作任何 Hermes 旧服务。
-4. 在真实测试群依次验收：文本、搜索、隔离浏览器、图片/视频理解、DOCX 生成与改写、图片/视频生成、TTS、提醒、取消、审批和 QuickJS。
-5. 测试群通过后一次性承接全部已授权群流量，不做按用户双写，也不导入普通聊天上下文。
-6. 对照切换前基线，确认 `ai.hermes.gateway` 的 PID、launchd 状态、配置哈希和会话状态未变化。
+   启动器仅使用 `--force` 绕过 Hermes 对“机器上已有任意网关”的宽泛守卫，绝不使用会替换进程的 `--replace`。它显式把 loopback 加入 `NO_PROXY/no_proxy`，避免本机代理把 MCP 请求送出主机。
+
+6. 在不连接微信的情况下执行真实供应商预检：
+
+   ```bash
+   pnpm hermes:preflight:live
+   pnpm dashscope:preflight
+   ```
+
+   第一项只验证专属 Hermes + DeepSeek，第二项默认验证 `qwen3.7-flash` 和 Qwen Audio TTS。图片/视频会产生费用，必须显式追加 `-- --image`、`--video` 或 `--paid-media`。Qwen Image 返回 403 时记录为供应商权限未开通，禁止宣称可用。
+
+## 数据迁移
+
+启动新构建时数据库迁移会：
+
+- 创建 `hermes_sessions`、`hermes_session_epochs`、`memory_proposals`、`agent_lessons`、`reflection_batches`、`reflection_candidates`；
+- 把任务语义收敛为 `origin=interactive|automation|reflection`；
+- 物理删除旧 tasks/automations 的 `request_type/tool_name/tool_input_json` 路由列与旧 Node `contexts` 表；
+- 只保留 `source=manual` 且不属于 `room_id='*'` 的记忆；旧 `global` 记录仅在其原群内转为 room scope；
+- 把旧 `scheduled_tool` 自动任务标记迁移为 `scheduled_prompt`。
+
+切换前必须对 `data/` 与 `config/local.yaml` 做受控快照，并记录上一稳定 Git SHA。
+
+## 发布
+
+1. 跑完整自动门禁和离线预检。
+2. 启动并检查专属 Hermes；确认 API/MCP 只监听 loopback，并发分别为 2/视频 1。
+3. 只停止 DangBot，备份数据后启动新构建。启动检查通过后才连接 WeChat。
+4. 在真实测试群完成 [手工验收](manual-acceptance.md)，再一次性承接所有已授权群流量；不做双写，不导入普通聊天上下文。
+5. 发布后重新采集 `ai.hermes.gateway` 基线，四项必须与发布前完全一致。
 
 ## 回滚
 
-发生阻断故障时，把 `DANGBOT_AGENT_BACKEND` 改回 `legacy` 并只重启 DangBot。保留数据库快照和关闭状态的旧实现至少一周；稳定一周后才另行删除 legacy Agent 循环。回滚和清理都不得触碰 `ai.hermes.gateway`。
+发生阻断故障时：
+
+1. 停止 DangBot；
+2. 恢复上一稳定 Git SHA、数据库和本地配置快照；
+3. 只启动 DangBot；
+4. 再次确认 `ai.hermes.gateway` 基线未变。
+
+不得把配置改成旧 backend，也不得停止或修改任何 Hermes 服务来“清场”。
 
 ## 日志与排障
 
-- 用 `taskId` / `runId` 关联 DangBot 与专属 Hermes 日志。只记录状态、延迟、工具名、审批、沙箱拒绝、模型用量和附件投递，不记录密钥、完整提示词、原始 capability token 或宿主路径。
-- 专属日志位于 `.runtime/hermes/home/logs/`；DangBot 日志仍由 `logging.file` 控制。
-- SSE 失败会自动转状态轮询；取消会调用 `/stop`、撤销 capability，并中断仍在执行的 MCP 操作。
-- 浏览器未安装时，重新运行 `pnpm hermes:bootstrap:browser`，不要使用全局浏览器或用户 Chrome 作为替代。
+- 用 `taskId/runId` 关联状态、延迟、失败、工具名、审批、沙箱拒绝、模型用量和 artifact 投递。日志不得包含密钥、原始 capability、完整提示词、原始 session key 或宿主路径。
+- SSE 断开后自动查询 run 状态。取消任务会调用 `/stop`、终止任务内工具并撤销 capability。
+- MCP 连接出现 502 时先检查 `NO_PROXY/no_proxy` 是否含 `127.0.0.1,localhost,::1`，不要把 loopback 流量交给 HTTP 代理。
+- 浏览器不可用时重新运行 bootstrap browser，不得指向用户 Chrome profile。
+- 专属日志位于 `.runtime/hermes/home/logs/`；DangBot 日志由 `logging.file` 控制。

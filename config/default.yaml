@@ -13,14 +13,12 @@ logging:
   level: info
   file: logs/dangbot.log
 agent:
-  # Switch to hermes only after the dedicated service and MCP health checks pass.
-  backend: ${DANGBOT_AGENT_BACKEND:-legacy}
   hermes:
     baseURL: ${DANGBOT_HERMES_BASE_URL:-http://127.0.0.1:18642}
     apiKey: ${DANGBOT_HERMES_API_KEY:-}
     sessionSecret: ${DANGBOT_HERMES_SESSION_SECRET:-}
     model: ${DANGBOT_HERMES_MODEL:-deepseek-v4-flash}
-    requestTimeoutMs: 300000
+    requestTimeoutMs: 900000
     pollIntervalMs: 1000
     maxConcurrentRuns: 2
   mcp:
@@ -29,18 +27,19 @@ agent:
     port: 18643
     apiKey: ${DANGBOT_MCP_API_KEY:-}
     contextTtlMs: 600000
+  memoryBridge:
+    baseURL: ${DANGBOT_MEMORY_BRIDGE_URL:-http://127.0.0.1:18643}
+    apiKey: ${DANGBOT_MEMORY_BRIDGE_API_KEY:-}
   sandbox:
     enabled: true
     maxExecutionMs: 2000
     memoryLimitBytes: 67108864
     maxOutputChars: 8000
-llm:
-  provider: ${LLM_PROVIDER:-dashscope}
+media:
   baseURL: ${DASHSCOPE_COMPATIBLE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
   nativeBaseURL: ${DASHSCOPE_NATIVE_BASE_URL:-https://dashscope.aliyuncs.com/api/v1}
   apiKey: ${DASHSCOPE_API_KEY:-}
-  textModel: ${DASHSCOPE_TEXT_MODEL:-qwen3.7-flash}
-  visionModel: ${DASHSCOPE_VISION_MODEL:-qwen3.7-flash}
+  multimodalModel: ${DASHSCOPE_MULTIMODAL_MODEL:-qwen3.7-flash}
   imageModel: ${DASHSCOPE_IMAGE_MODEL:-qwen-image-3.0-pro}
   videoModels:
     textToVideo: ${DASHSCOPE_T2V_MODEL:-happyhorse-1.1-t2v}
@@ -49,41 +48,16 @@ llm:
     videoEdit: ${DASHSCOPE_VIDEO_EDIT_MODEL:-happyhorse-1.0-video-edit}
   tts:
     enabled: ${DASHSCOPE_TTS_ENABLED:-true}
-    provider: ${TTS_PROVIDER:-dashscope}
-    baseURL: ${DASHSCOPE_NATIVE_BASE_URL:-https://dashscope.aliyuncs.com/api/v1}
     apiKey: ${DASHSCOPE_TTS_API_KEY:-}
     model: ${DASHSCOPE_TTS_MODEL:-qwen-audio-3.0-tts-flash}
-    resourceId: seed-tts-2.0
     voice: ${DASHSCOPE_TTS_VOICE:-longanhuan_v3.6}
-    speechRate: 0
-search:
-  enabled: ${WEB_SEARCH_ENABLED:-true}
-  provider: ${WEB_SEARCH_PROVIDER:-hermes}
-  braveApiKey: ${BRAVE_SEARCH_API_KEY:-}
-  engine: ${OPENROUTER_WEB_SEARCH_ENGINE:-}
-  searchContextSize: medium
-  count: 5
-  searchLang: zh-hans
-  uiLang: zh-CN
-  safeSearch: moderate
-  extraSnippets: true
-tools:
-  policy:
-    defaultHighRiskRequiresApproval: true
-    allowNetworkTools: true
-    allowFileWriteTools: false
-    maxToolOutputChars: 8000
-    denyTools: []
-    roomToolOverrides: []
 limits:
   userRequestsPerMinute: 6
   roomRequestsPerMinute: 30
-  fileTasksPerMinute: 3
   imageTasksPerMinute: 6
+  imageGenerationTasksPerMinute: 1
   voiceTasksPerMinute: 4
   videoTasksPerMinute: 2
-  searchTasksPerMinute: 6
-  maxAgentSteps: 8
   agentTaskTimeoutMs: 300000
   maxConcurrentTasks: 2
   maxConcurrentLongTasks: 1
@@ -94,13 +68,18 @@ limits:
   maxImageBytes: 10485760
   maxVideoBytes: 52428800
   maxReplyTextChars: 1800
-  contextMessagesPerUser: 32
   publicContextMessagesPerRoom: 160
   memoryEntriesPerUser: 20
   globalMemoryEntries: 30
-  userMemoryIdleMs: 3600000
-  memoryConsolidationKeepContextMessages: 8
   attachmentTtlHours: 24
+  maxMcpOutputChars: 8000
+reflection:
+  enabled: true
+  candidateThreshold: 5
+  idleMs: 900000
+  minSessionIntervalMs: 1800000
+  maxTasksPerBatch: 8
+  autoWriteConfidence: 0.95
 automations:
   enabled: true
   tickMs: 30000

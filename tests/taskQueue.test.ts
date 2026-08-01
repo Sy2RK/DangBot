@@ -11,7 +11,7 @@ describe('TaskQueue completion', () => {
     const task = db.createTask({
       roomId: 'room1',
       userId: 'user1',
-      requestType: 'qa',
+      origin: 'interactive',
       prompt: 'test',
       status: 'received'
     });
@@ -33,7 +33,7 @@ describe('TaskQueue completion', () => {
     const task = db.createTask({
       roomId: 'room1',
       userId: 'user1',
-      requestType: 'qa',
+      origin: 'interactive',
       prompt: 'test',
       status: 'received'
     });

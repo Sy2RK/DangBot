@@ -8,7 +8,7 @@ export type TaskStatus =
 
 export type UserRole = 'member' | 'group_admin' | 'system_admin';
 
-export type AgentBackendMode = 'legacy' | 'hermes';
+export type TaskOrigin = 'interactive' | 'automation' | 'reflection';
 
 export type HermesRunStatus =
   | 'queued'
@@ -25,7 +25,11 @@ export type ResultKind = 'text' | 'image' | 'file';
 
 export type AttachmentKind = 'file' | 'image' | 'video';
 
-export type MemoryScope = 'user' | 'global';
+export type MemoryScope = 'user' | 'room';
+
+export type MemoryProposalScope = 'user' | 'room' | 'agent';
+
+export type MemoryProposalStatus = 'pending' | 'approved' | 'rejected' | 'auto_approved';
 
 export type ToolRiskLevel = 'low' | 'medium' | 'high' | 'blocked';
 
@@ -33,29 +37,11 @@ export type ToolCallStatus = 'created' | 'running' | 'completed' | 'failed' | 'c
 
 export type ToolResultKind = 'text' | 'image' | 'file';
 
-export type AutomationKind = 'reminder' | 'scheduled_prompt' | 'scheduled_tool';
+export type AutomationKind = 'reminder' | 'scheduled_prompt';
 
 export type AutomationScheduleType = 'once' | 'daily' | 'weekly' | 'interval';
 
 export type AutomationStatus = 'active' | 'paused' | 'completed' | 'failed';
-
-export type RequestKind =
-  | 'qa'
-  | 'summary'
-  | 'rewrite'
-  | 'translate'
-  | 'web_search'
-  | 'file_analysis'
-  | 'image_analysis'
-  | 'video_analysis'
-  | 'image_generation'
-  | 'voice_generation'
-  | 'video_generation'
-  | 'document_generation'
-  | 'report'
-  | 'room_minutes'
-  | 'data整理'
-  | 'admin';
 
 export interface RoomConfig {
   stableId?: string;
@@ -85,7 +71,6 @@ export interface AppConfig {
     file: string;
   };
   agent: {
-    backend: AgentBackendMode;
     hermes: {
       baseURL: string;
       apiKey: string;
@@ -102,6 +87,10 @@ export interface AppConfig {
       apiKey: string;
       contextTtlMs: number;
     };
+    memoryBridge: {
+      baseURL: string;
+      apiKey: string;
+    };
     sandbox: {
       enabled: boolean;
       maxExecutionMs: number;
@@ -109,15 +98,12 @@ export interface AppConfig {
       maxOutputChars: number;
     };
   };
-  llm: {
-    provider: 'openai-compatible' | 'dashscope';
+  media: {
     baseURL: string;
     nativeBaseURL: string;
     apiKey: string;
-    textModel: string;
-    visionModel: string;
-    imageModel?: string;
-    videoModel?: string;
+    multimodalModel: string;
+    imageModel: string;
     videoModels: {
       textToVideo: string;
       imageToVideo: string;
@@ -126,51 +112,18 @@ export interface AppConfig {
     };
     tts: {
       enabled: boolean;
-      provider: 'doubao' | 'dashscope';
-      baseURL: string;
       apiKey: string;
       model: string;
-      resourceId: string;
       voice: string;
-      speechRate: number;
-    };
-  };
-  search: {
-    enabled: boolean;
-    provider: 'openrouter' | 'brave' | 'hermes';
-    braveApiKey: string;
-    engine?: 'auto' | 'native' | 'exa' | 'firecrawl' | 'parallel';
-    searchContextSize: 'low' | 'medium' | 'high';
-    count: number;
-    country?: string;
-    searchLang?: string;
-    uiLang?: string;
-    safeSearch: 'off' | 'moderate' | 'strict';
-    extraSnippets: boolean;
-  };
-  tools: {
-    policy: {
-      defaultHighRiskRequiresApproval: boolean;
-      allowNetworkTools: boolean;
-      allowFileWriteTools: boolean;
-      maxToolOutputChars: number;
-      denyTools: string[];
-      roomToolOverrides: Array<{
-        roomId: string;
-        denyTools: string[];
-        allowTools: string[];
-      }>;
     };
   };
   limits: {
     userRequestsPerMinute: number;
     roomRequestsPerMinute: number;
-    fileTasksPerMinute: number;
     imageTasksPerMinute: number;
+    imageGenerationTasksPerMinute: number;
     voiceTasksPerMinute: number;
     videoTasksPerMinute: number;
-    searchTasksPerMinute: number;
-    maxAgentSteps: number;
     agentTaskTimeoutMs: number;
     maxConcurrentTasks: number;
     maxConcurrentLongTasks: number;
@@ -181,13 +134,19 @@ export interface AppConfig {
     maxImageBytes: number;
     maxVideoBytes: number;
     maxReplyTextChars: number;
-    contextMessagesPerUser: number;
     publicContextMessagesPerRoom: number;
     memoryEntriesPerUser: number;
     globalMemoryEntries: number;
-    userMemoryIdleMs: number;
-    memoryConsolidationKeepContextMessages: number;
     attachmentTtlHours: number;
+    maxMcpOutputChars: number;
+  };
+  reflection: {
+    enabled: boolean;
+    candidateThreshold: number;
+    idleMs: number;
+    minSessionIntervalMs: number;
+    maxTasksPerBatch: number;
+    autoWriteConfidence: number;
   };
   automations: {
     enabled: boolean;
@@ -245,10 +204,14 @@ export interface ParsedCommand {
     | 'cancel_task'
     | 'approve_task'
     | 'reject_task'
+    | 'approve_memory_proposal'
+    | 'reject_memory_proposal'
     | 'remember_user'
     | 'remember_global'
     | 'show_user_memory'
     | 'show_global_memory'
+    | 'list_memory_proposals'
+    | 'delete_user_memory'
     | 'clear_user_memory'
     | 'clear_global_memory'
     | 'create_automation'
@@ -261,6 +224,8 @@ export interface ParsedCommand {
   taskId?: string;
   automationId?: string;
   automationIndex?: number;
+  proposalId?: string;
+  memoryId?: string;
   prompt?: string;
   memoryText?: string;
   automationText?: string;
@@ -270,15 +235,13 @@ export interface TaskRecord {
   id: string;
   roomId: string;
   userId: string;
-  requestType: RequestKind;
+  origin: TaskOrigin;
   status: TaskStatus;
   prompt: string;
   resultKind?: ResultKind;
   resultText?: string;
   resultPath?: string;
   error?: string;
-  toolName?: string;
-  toolInputJson?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -333,13 +296,10 @@ export interface AutomationRecord {
   creatorId: string;
   name: string;
   kind: AutomationKind;
-  requestType: RequestKind;
   scheduleType: AutomationScheduleType;
   scheduleSpecJson: string;
   timezone: string;
   prompt: string;
-  toolName?: string;
-  toolInputJson?: string;
   status: AutomationStatus;
   consecutiveFailures: number;
   lastRunAt?: string;
@@ -375,10 +335,62 @@ export interface McpContextRecord {
   roomId: string;
   userId: string;
   role: UserRole;
+  purpose: TaskOrigin;
   attachmentIds: string[];
   expiresAt: string;
   revokedAt?: string;
   createdAt: string;
+}
+
+export interface HermesSessionRecord {
+  sessionKeyHash: string;
+  roomId: string;
+  userId: string;
+  epoch: number;
+  purpose: TaskOrigin;
+  hermesSessionId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryProposalRecord {
+  id: string;
+  scope: MemoryProposalScope;
+  roomId: string;
+  userId?: string;
+  content: string;
+  evidence: string;
+  confidence: number;
+  status: MemoryProposalStatus;
+  proposerTaskId?: string;
+  decidedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentLessonRecord {
+  id: string;
+  content: string;
+  evidence: string;
+  confidence: number;
+  approvedBy: string;
+  revokedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReflectionBatchRecord {
+  id: string;
+  roomId: string;
+  userId: string;
+  trigger: 'threshold' | 'idle' | 'manual';
+  taskIds: string[];
+  evidence: Array<{ taskId: string; signal: string; evidence: string }>;
+  hermesRunId?: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  result?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ArtifactRecord {

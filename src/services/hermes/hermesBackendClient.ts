@@ -1,5 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import type { AppConfig, HermesRunStatus } from '../../types.js';
+import { redactSensitiveText } from '../../utils/redaction.js';
 
 export interface HermesRunEvent {
   event:
@@ -63,7 +64,9 @@ export class HermesBackendClient {
 
   sessionIdentity(
     roomId: string,
-    userId: string
+    userId: string,
+    epoch = 0,
+    purpose: 'interactive' | 'reflection' = 'interactive'
   ): {
     sessionId: string;
     sessionKey: string;
@@ -73,11 +76,11 @@ export class HermesBackendClient {
       throw new Error('Hermes 会话密钥未配置。');
     }
     const digest = createHmac('sha256', this.config.sessionSecret)
-      .update(`${roomId}\u0000${userId}`)
+      .update(`${roomId}\u0000${userId}\u0000${epoch}\u0000${purpose}`)
       .digest('hex');
     const sessionKey = `dangbot:${digest}`;
     return {
-      sessionId: `dangbot_${digest.slice(0, 40)}`,
+      sessionId: `dangbot_${purpose === 'reflection' ? 'r' : 'i'}_${digest.slice(0, 40)}`,
       sessionKey,
       sessionKeyHash: sha256(sessionKey)
     };
@@ -118,7 +121,7 @@ export class HermesBackendClient {
       await input.onStarted?.(runId);
 
       const abortHandler = () => void this.stopRun(runId!).catch(() => undefined);
-      signal.addEventListener('abort', abortHandler, { once: true });
+      timeout.signal.addEventListener('abort', abortHandler, { once: true });
       try {
         const streamed = await this.consumeEvents(runId, input.onEvent, timeout.signal).catch(
           (error: unknown) => {
@@ -131,7 +134,7 @@ export class HermesBackendClient {
         const polled = await this.pollRun(runId, input.onEvent, timeout.signal);
         return toRunResult(runId, input.sessionId, polled);
       } finally {
-        signal.removeEventListener('abort', abortHandler);
+        timeout.signal.removeEventListener('abort', abortHandler);
       }
     } finally {
       timeout.dispose();
@@ -352,10 +355,9 @@ function abortError(): Error {
 
 function safeErrorPreview(text: string): string {
   const compact = text
-    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
     .replace(/\s+/g, ' ')
     .trim();
-  return compact.slice(0, 300) || '无错误详情';
+  return redactSensitiveText(compact, 300) || '无错误详情';
 }
 
 function sha256(value: string): string {

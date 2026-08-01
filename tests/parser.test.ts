@@ -25,6 +25,11 @@ describe('parser', () => {
     });
     expect(parseCommand('我的记忆').type).toBe('show_user_memory');
     expect(parseCommand('全局记忆').type).toBe('show_global_memory');
+    expect(parseCommand('记忆提案').type).toBe('list_memory_proposals');
+    expect(parseCommand('忘记 mem_abc12345')).toMatchObject({
+      type: 'delete_user_memory',
+      memoryId: 'mem_abc12345'
+    });
     expect(parseCommand('清空我的记忆').type).toBe('clear_user_memory');
     expect(parseCommand('清空全局记忆').type).toBe('clear_global_memory');
   });

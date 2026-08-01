@@ -10,3 +10,5 @@ config/local.yaml
 *.memory-card.json
 *.log
 .DS_Store
+__pycache__/
+*.py[cod]
